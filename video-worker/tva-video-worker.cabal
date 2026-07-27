@@ -1,0 +1,32 @@
+cabal-version:      3.14
+
+name:               tva-video-worker
+version:            0.1.0.0
+
+synopsis:           Video processing worker for the tva service.
+description:        Background worker that processes videos, applies transformations, and manages output storage for the tva video-processing service.
+
+license:            MIT
+license-file:       ../LICENSE
+
+author:             William Fernandes Dias
+maintainer:         william.winchester1967@gmail.com
+
+build-type:         Simple
+
+extra-doc-files:    ../CHANGELOG.md
+
+common warnings
+    ghc-options: -Wall
+
+executable tva-video-worker
+    import:           warnings
+
+    main-is:          Main.hs
+
+    build-depends:    base ^>=4.20.2.0,
+                      tva-core-domain
+
+    hs-source-dirs:   .
+
+    default-language: GHC2024

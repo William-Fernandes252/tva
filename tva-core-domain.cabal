@@ -11,7 +11,7 @@ cabal-version:      3.14
 --   http://haskell.org/cabal/users-guide/
 --
 -- The name of the package.
-name:               tva
+name:               tva-core-domain
 
 -- The package version.
 -- See the Haskell package versioning policy (PVP) for standards
@@ -23,10 +23,10 @@ name:               tva
 version:            0.1.0.0
 
 -- A short (one-line) description of the package.
-synopsis: Asynchronous video-processing service for the web, written in Haskell.
+synopsis: Core domain types and logic for the video-processing service.
 
 -- A longer description of the package.
-description: This project is a Haskell-based asynchronous video-processing service for the web. It provides a cloud-agnostic solution for video processing, allowing users to upload videos and receive processed outputs without worrying about the underlying infrastructure. The service is designed to be scalable, efficient, and easy to integrate into web applications.
+description: Shared domain types, business logic, and utilities for the tva video-processing service. Used by api-server, video-worker, and notifier-worker services.
 
 -- The license under which the package is released.
 license:            MIT
@@ -53,15 +53,12 @@ extra-doc-files:    CHANGELOG.md
 common warnings
     ghc-options: -Wall
 
-executable tva
+library
     -- Import common warning flags.
     import:           warnings
 
-    -- .hs or .lhs file containing the Main module.
-    main-is:          Main.hs
-
-    -- Modules included in this executable, other than Main.
-    -- other-modules:
+    -- Modules included in this library.
+    exposed-modules:  Lib
 
     -- LANGUAGE extensions used by modules in this package.
     -- other-extensions:

@@ -1,0 +1,5 @@
+packages:
+  tva-core-domain.cabal
+  api-server/tva-api-server.cabal
+  video-worker/tva-video-worker.cabal
+  notifier-worker/tva-notifier-worker.cabal

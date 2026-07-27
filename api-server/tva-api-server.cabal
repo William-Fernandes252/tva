@@ -1,0 +1,32 @@
+cabal-version:      3.14
+
+name:               tva-api-server
+version:            0.1.0.0
+
+synopsis:           REST API server for the tva video-processing service.
+description:        API server that handles video upload requests and job status queries for the tva video-processing service.
+
+license:            MIT
+license-file:       ../LICENSE
+
+author:             William Fernandes Dias
+maintainer:         william.winchester1967@gmail.com
+
+build-type:         Simple
+
+extra-doc-files:    ../CHANGELOG.md
+
+common warnings
+    ghc-options: -Wall
+
+executable tva-api-server
+    import:           warnings
+
+    main-is:          Main.hs
+
+    build-depends:    base ^>=4.20.2.0,
+                      tva-core-domain
+
+    hs-source-dirs:   .
+
+    default-language: GHC2024
