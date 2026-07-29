@@ -58,16 +58,20 @@ library
     import:           warnings
 
     -- Modules included in this library.
-    exposed-modules:  Lib
+    exposed-modules:  Domain.Core,
+                      Domain.Database
 
     -- LANGUAGE extensions used by modules in this package.
     -- other-extensions:
 
     -- Other library packages from which modules are imported.
-    build-depends:    base ^>=4.20.2.0
+    build-depends:    base >=4.17 && <5,
+                      rel8 >=1.5,
+                      text >=2.0,
+                      uuid >=1.3
 
     -- Directories containing source files.
-    hs-source-dirs:   core-domain
+    hs-source-dirs:   core-domain/src
 
     -- Base language which the package is written in.
-    default-language: GHC2024
+    default-language: GHC2021

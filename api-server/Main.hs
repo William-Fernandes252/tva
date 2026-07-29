@@ -1,6 +1,4 @@
 module Main (main) where
 
-import qualified Lib
-
 main :: IO ()
-main = putStrLn $ Lib.greet "API Server"
+main = putStrLn "API Server starting..."

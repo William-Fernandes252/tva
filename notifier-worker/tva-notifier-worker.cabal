@@ -24,9 +24,9 @@ executable tva-notifier-worker
 
     main-is:          Main.hs
 
-    build-depends:    base ^>=4.20.2.0,
+    build-depends:    base >=4.17 && <5,
                       tva-core-domain
 
     hs-source-dirs:   .
 
-    default-language: GHC2024
+    default-language: GHC2021

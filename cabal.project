@@ -1,5 +1,11 @@
+with-compiler: ghc-9.4.8
+
 packages:
   tva-core-domain.cabal
   api-server/tva-api-server.cabal
   video-worker/tva-video-worker.cabal
   notifier-worker/tva-notifier-worker.cabal
+
+constraints:
+  semialign <1.3,
+  rel8 ==1.6.0.0

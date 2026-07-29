@@ -2,13 +2,17 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE DisambiguateRecordFields #-}
+{-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 module Domain.Database where
 
+import Data.Int (Int32)
 import Data.Text (Text)
 import Data.UUID (UUID)
 import GHC.Generics (Generic)
@@ -38,7 +42,7 @@ data VideoJobRow f = VideoJobRow
   , jobStatus    :: Column f JobState
   , sourceUrl    :: Column f Text
   , assignedTo   :: Column f (Maybe (EntityId Worker))
-  , progress     :: Column f (Maybe Int)
+  , progress     :: Column f (Maybe Int32)
   , outputChunks :: Column f [Text]
   }
   deriving stock (Generic)
@@ -49,8 +53,10 @@ deriving stock instance Show (VideoJobRow Result)
 -- | Defines the schema for the video_jobs table in the database.
 videoJobTable :: TableSchema (VideoJobRow Name)
 videoJobTable = TableSchema
-  { name    = "video_jobs"
-  , schema  = Just "public"
+  { name = QualifiedName
+      { name = "video_jobs"
+      , schema = Just "public"
+      }
   , columns = VideoJobRow
       { jobId        = "id"
       , jobStatus    = "status"

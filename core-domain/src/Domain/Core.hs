@@ -7,6 +7,7 @@
 
 module Domain.Core where
 
+import Data.Int (Int32)
 import Data.Kind (Type)
 import Data.Text (Text)
 import Data.UUID (UUID)
@@ -25,13 +26,14 @@ data User
 
 -- | Represents the state of a video processing job.
 data JobState = Pending | Processing | Completed
+  deriving Show
 
 -- | A GADT representing a video processing job, parameterized by its state.
 data VideoJob (s :: JobState) where
   -- A pending job only knows the source file location.
   QueuedJob :: EntityId Video -> Text -> VideoJob 'Pending
   -- A running job MUST have an assigned worker and a progress percentage.
-  RunningJob :: EntityId Video -> EntityId Worker -> Int -> VideoJob 'Processing
+  RunningJob :: EntityId Video -> EntityId Worker -> Int32 -> VideoJob 'Processing
   -- A finished job MUST have the output paths (e.g., HLS chunks).
   FinishedJob :: EntityId Video -> [Text] -> VideoJob 'Completed
 
