@@ -1,0 +1,22 @@
+name: tva-notifier-worker
+version: 0.1.0.0
+synopsis: Notification worker for the tva video-processing service.
+description: Background worker that sends notifications to users about video processing job status updates for the tva service.
+license: MIT
+license-file: ../LICENSE
+author: William Fernandes Dias
+maintainer: william.winchester1967@gmail.com
+extra-doc-files:
+- ../CHANGELOG.md
+
+language: GHC2021
+
+dependencies:
+- base >= 4.17 && < 5
+- tva-core-domain
+
+executables:
+  tva-notifier-worker:
+    main: Main.hs
+    source-dirs: .
+    ghc-options: -Wall

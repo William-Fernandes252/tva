@@ -1,0 +1,22 @@
+name: tva-video-worker
+version: 0.1.0.0
+synopsis: Video processing worker for the tva service.
+description: Background worker that processes videos, applies transformations, and manages output storage for the tva video-processing service.
+license: MIT
+license-file: ../LICENSE
+author: William Fernandes Dias
+maintainer: william.winchester1967@gmail.com
+extra-doc-files:
+- ../CHANGELOG.md
+
+language: GHC2021
+
+dependencies:
+- base >= 4.17 && < 5
+- tva-core-domain
+
+executables:
+  tva-video-worker:
+    main: Main.hs
+    source-dirs: .
+    ghc-options: -Wall

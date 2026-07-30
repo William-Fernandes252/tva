@@ -1,0 +1,12 @@
+resolver: lts-21.25
+packages:
+- .
+- api-server
+- video-worker
+- notifier-worker
+
+extra-deps:
+- rel8-1.6.0.0
+- base16-1.0
+
+allow-newer: true

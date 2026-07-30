@@ -1,0 +1,22 @@
+name: tva-api-server
+version: 0.1.0.0
+synopsis: REST API server for the tva video-processing service.
+description: API server that handles video upload requests and job status queries for the tva video-processing service.
+license: MIT
+license-file: ../LICENSE
+author: William Fernandes Dias
+maintainer: william.winchester1967@gmail.com
+extra-doc-files:
+- ../CHANGELOG.md
+
+language: GHC2021
+
+dependencies:
+- base >= 4.17 && < 5
+- tva-core-domain
+
+executables:
+  tva-api-server:
+    main: Main.hs
+    source-dirs: .
+    ghc-options: -Wall

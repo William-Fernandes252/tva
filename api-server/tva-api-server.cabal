@@ -1,32 +1,29 @@
-cabal-version:      3.14
+cabal-version: 1.18
 
-name:               tva-api-server
-version:            0.1.0.0
+-- This file has been generated from package.yaml by hpack version 0.39.6.
+--
+-- see: https://github.com/sol/hpack
 
-synopsis:           REST API server for the tva video-processing service.
-description:        API server that handles video upload requests and job status queries for the tva video-processing service.
-
-license:            MIT
-license-file:       ../LICENSE
-
-author:             William Fernandes Dias
-maintainer:         william.winchester1967@gmail.com
-
-build-type:         Simple
-
-extra-doc-files:    ../CHANGELOG.md
-
-common warnings
-    ghc-options: -Wall
+name:           tva-api-server
+version:        0.1.0.0
+synopsis:       REST API server for the tva video-processing service.
+description:    API server that handles video upload requests and job status queries for the tva video-processing service.
+author:         William Fernandes Dias
+maintainer:     william.winchester1967@gmail.com
+license:        MIT
+license-file:   ../LICENSE
+build-type:     Simple
+extra-doc-files:
+    ../CHANGELOG.md
 
 executable tva-api-server
-    import:           warnings
-
-    main-is:          Main.hs
-
-    build-depends:    base >=4.17 && <5,
-                      tva-core-domain
-
-    hs-source-dirs:   .
-
-    default-language: GHC2021
+  main-is: Main.hs
+  other-modules:
+      Paths_tva_api_server
+  hs-source-dirs:
+      ./
+  ghc-options: -Wall
+  build-depends:
+      base >=4.17 && <5
+    , tva-core-domain
+  default-language: GHC2021
