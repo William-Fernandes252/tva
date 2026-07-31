@@ -1,4 +1,6 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE PolyKinds #-}
@@ -7,15 +9,17 @@
 
 module Domain.Core where
 
+import Data.Aeson (FromJSON, ToJSON)
 import Data.Int (Int32)
 import Data.Kind (Type)
 import Data.Text (Text)
 import Data.UUID (UUID)
+import GHC.Generics (Generic)
 import GHC.TypeLits (Symbol)
 
 -- | A type-safe wrapper for entity identifiers, parameterized by a phantom type tag.
 newtype EntityId (tag :: k) = EntityId UUID
-  deriving (Show, Eq)
+  deriving (Show, Eq, Generic, FromJSON, ToJSON)
 
 -- | Core domain entities for the video processing service.
 data Video
@@ -26,7 +30,7 @@ data User
 
 -- | Represents the state of a video processing job.
 data JobState = Pending | Processing | Completed
-  deriving Show
+  deriving (Show, Generic, FromJSON, ToJSON)
 
 -- | A GADT representing a video processing job, parameterized by its state.
 data VideoJob (s :: JobState) where

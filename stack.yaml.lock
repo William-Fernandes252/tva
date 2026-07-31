@@ -18,6 +18,20 @@ packages:
       size: 1457
   original:
     hackage: base16-1.0
+- completed:
+    hackage: opaleye-0.10.3.0@sha256:076a93a9698de92e837e093ed421650654b6750247f53f7e51d52e9af793a2f1,6201
+    pantry-tree:
+      sha256: 23215936f66c840e539fbda6fc51d20baf598267ffdd0aa1c4b3eab6e6780d3a
+      size: 5781
+  original:
+    hackage: opaleye-0.10.3.0
+- completed:
+    hackage: product-profunctors-0.11.1.1@sha256:416655deb9a9e8829b4f5257e43125302527760f115b0a25daa3ffe05d0ae596,2566
+    pantry-tree:
+      sha256: 359e00c556041a129ef7a6b794ad1ecaf6ddd58804e2f431dd412752e4f4c754
+      size: 1538
+  original:
+    hackage: product-profunctors-0.11.1.1
 snapshots:
 - completed:
     sha256: a81fb3877c4f9031e1325eb3935122e608d80715dc16b586eb11ddbff8671ecd

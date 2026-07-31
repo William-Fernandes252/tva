@@ -14,9 +14,15 @@ language: GHC2021
 dependencies:
 - base >= 4.17 && < 5
 - tva-core-domain
+- servant-server
+- servant
+- warp
+- uuid
+- aeson
+- text
 
 executables:
   tva-api-server:
     main: Main.hs
-    source-dirs: .
+    source-dirs: [., src]
     ghc-options: -Wall

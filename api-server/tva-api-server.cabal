@@ -19,11 +19,19 @@ extra-doc-files:
 executable tva-api-server
   main-is: Main.hs
   other-modules:
+      Api
       Paths_tva_api_server
   hs-source-dirs:
       ./
+      src
   ghc-options: -Wall
   build-depends:
-      base >=4.17 && <5
+      aeson
+    , base >=4.17 && <5
+    , servant
+    , servant-server
+    , text
     , tva-core-domain
+    , uuid
+    , warp
   default-language: GHC2021
