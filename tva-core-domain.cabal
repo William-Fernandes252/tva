@@ -21,6 +21,7 @@ library
       Domain.Core
       Domain.Database
   other-modules:
+      Domain.Storage
       Paths_tva_core_domain
   hs-source-dirs:
       core-domain/src
