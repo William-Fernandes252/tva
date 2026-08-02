@@ -20,7 +20,7 @@ executable tva-api-server
   main-is: Main.hs
   other-modules:
       Api
-      Paths_tva_api_server
+      Adapters.S3
   hs-source-dirs:
       ./
       src
@@ -28,9 +28,15 @@ executable tva-api-server
   build-depends:
       aeson
     , base >=4.17 && <5
+    , base16-bytestring
+    , bytestring
+    , crypton
+    , memory
+    , mtl
     , servant
     , servant-server
     , text
+    , time
     , tva-core-domain
     , uuid
     , warp

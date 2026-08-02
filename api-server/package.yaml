@@ -20,9 +20,18 @@ dependencies:
 - uuid
 - aeson
 - text
+- crypton
+- base16-bytestring
+- memory
+- mtl
+- time
+- bytestring
 
 executables:
   tva-api-server:
     main: Main.hs
     source-dirs: [., src]
+    other-modules:
+    - Api
+    - Adapters.S3
     ghc-options: -Wall

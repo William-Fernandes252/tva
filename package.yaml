@@ -15,6 +15,7 @@ dependencies:
 - base >= 4.17 && < 5
 - rel8 >= 1.5
 - text >= 2.0
+- time >= 1.12
 - uuid >= 1.3
 - aeson
 
@@ -23,4 +24,5 @@ library:
   exposed-modules:
   - Domain.Core
   - Domain.Database
+  - Domain.Storage
   ghc-options: -Wall

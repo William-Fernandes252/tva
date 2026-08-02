@@ -2,42 +2,61 @@
 
 module Main where
 
+import Adapters.S3 (AppM (..), S3Config, initMinioEnv)
 import Api
-import Control.Monad.IO.Class (liftIO)
+import Control.Exception (SomeException, try)
+import Control.Monad.Except (ExceptT (..))
+import Control.Monad.IO.Class (MonadIO, liftIO)
+import Control.Monad.Reader (runReaderT)
+import Data.String (fromString)
+import Data.Time (NominalDiffTime)
 import Data.UUID (UUID)
-import Data.UUID qualified
 import Data.UUID.V4 (nextRandom)
 import Domain.Core (EntityId (..), JobState (..))
+import Domain.Storage (MonadStorage (..))
 import Network.Wai.Handler.Warp (run)
 import Servant
 
--- | Servant server implementation for the VideoAPI.
-server :: Server VideoAPI
+-- | Polymorphic server implementation for the VideoAPI.
+--   Works in any monad that supports storage operations and IO.
+server :: (MonadStorage m, MonadIO m) => ServerT VideoAPI m
 server = requestUpload :<|> checkStatus :<|> handleMinioWebhook
   where
     -- | Handler for POST /videos
-    requestUpload :: UploadRequest -> Handler UploadResponse
-    requestUpload req = do
+    requestUpload :: (MonadStorage m, MonadIO m) => UploadRequest -> m UploadResponse
+    requestUpload _req = do
       uuid <- liftIO nextRandom
-      let vId = EntityId uuid
-          dummyUrl = "http://localhost:9000/videos/" <> (Data.UUID.toText uuid) <> "?X-Amz-Signature=..."
+      let videoId = EntityId uuid
+          ttl     = 3600 :: NominalDiffTime  -- 1 hour presigned URL TTL
 
-      return $ UploadResponse vId dummyUrl
+      url <- generateUploadUrl videoId ttl
+      return $ UploadResponse videoId url
 
     -- | Handler for GET /videos/:id/status
-    checkStatus :: UUID -> Handler StatusResponse
-    checkStatus uuid = do
+    checkStatus :: MonadIO m => UUID -> m StatusResponse
+    checkStatus _uuid = do
       return $ StatusResponse Pending Nothing
 
-    handleMinioWebhook :: MinioWebhookEvent -> Handler NoContent
+    handleMinioWebhook :: MonadIO m => MinioWebhookEvent -> m NoContent
     handleMinioWebhook _event = do
       return NoContent
 
--- | Application Boot
-app :: Application
-app = serve videoApi server
+-- | Natural transformation from AppM to Handler.
+--   Catches IO exceptions and wraps them as HTTP 500 errors.
+nt :: S3Config -> AppM a -> Handler a
+nt cfg action = Handler $ ExceptT $ do
+  result <- try $ runReaderT (runAppM action) cfg
+  case result of
+    Left (e :: SomeException) ->
+      pure $ Left $ err500 { errBody = fromString $ "Internal server error: " ++ show e }
+    Right a ->
+      pure $ Right a
 
+-- | Application Boot
 main :: IO ()
 main = do
+  putStrLn "Initializing S3/MinIO connection..."
+  cfg <- initMinioEnv
   putStrLn "Starting api-server on port 8080..."
-  run 8080 app
+  let application = serve videoApi (hoistServer videoApi (nt cfg) server)
+  run 8080 application

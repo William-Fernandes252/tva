@@ -20,8 +20,8 @@ library
   exposed-modules:
       Domain.Core
       Domain.Database
-  other-modules:
       Domain.Storage
+  other-modules:
       Paths_tva_core_domain
   hs-source-dirs:
       core-domain/src
@@ -31,5 +31,6 @@ library
     , base >=4.17 && <5
     , rel8 >=1.5
     , text >=2.0
+    , time >=1.12
     , uuid >=1.3
   default-language: GHC2021
