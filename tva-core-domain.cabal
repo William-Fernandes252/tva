@@ -22,6 +22,8 @@ library
       Domain.Database
       Domain.Storage
   other-modules:
+      Domain.Event
+      Domain.Queue
       Paths_tva_core_domain
   hs-source-dirs:
       core-domain/src
