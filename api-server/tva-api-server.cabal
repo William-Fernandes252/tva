@@ -19,10 +19,10 @@ extra-doc-files:
 executable tva-api-server
   main-is: Main.hs
   other-modules:
+      Api
       Adapters.MockQueue
       Adapters.RabbitMQ
       Adapters.S3
-      Api
       Config
   hs-source-dirs:
       ./
