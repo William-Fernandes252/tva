@@ -24,5 +24,7 @@ library:
   exposed-modules:
   - Domain.Core
   - Domain.Database
+  - Domain.Event
+  - Domain.Queue
   - Domain.Storage
   ghc-options: -Wall

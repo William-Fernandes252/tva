@@ -26,6 +26,7 @@ dependencies:
 - mtl
 - time
 - bytestring
+- amqp
 
 executables:
   tva-api-server:
@@ -33,5 +34,8 @@ executables:
     source-dirs: [., src]
     other-modules:
     - Api
+    - Adapters.MockQueue
+    - Adapters.RabbitMQ
     - Adapters.S3
+    - Config
     ghc-options: -Wall

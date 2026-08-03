@@ -2,7 +2,7 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 
-module Adapter.MockQueue where
+module Adapters.MockQueue where
 
 import Control.Monad.State (State, MonadState, modify, runState)
 import Domain.Queue (MonadQueue(..))

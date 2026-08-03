@@ -20,10 +20,10 @@ library
   exposed-modules:
       Domain.Core
       Domain.Database
-      Domain.Storage
-  other-modules:
       Domain.Event
       Domain.Queue
+      Domain.Storage
+  other-modules:
       Paths_tva_core_domain
   hs-source-dirs:
       core-domain/src

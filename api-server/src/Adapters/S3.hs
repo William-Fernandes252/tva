@@ -1,12 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE TypeFamilies #-}
 
 module Adapters.S3 where
 
 import Control.Monad.IO.Class (MonadIO, liftIO)
-import Control.Monad.Reader (MonadReader, ReaderT, asks)
 import Crypto.Hash.Algorithms (SHA256)
 import Crypto.Hash (Digest, hash)
 import Crypto.MAC.HMAC (HMAC, hmac, hmacGetDigest)
@@ -15,11 +11,11 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base16 as Base16
 import qualified Data.ByteString.Char8 as B8
 import Data.Maybe (fromMaybe)
+import Data.Text (Text)
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Data.Time (NominalDiffTime, UTCTime, diffUTCTime, addUTCTime, getCurrentTime)
 import Data.Time.Format (formatTime, defaultTimeLocale)
 import Domain.Core (EntityId (..))
-import Domain.Storage (MonadStorage (..))
 import Data.UUID (toText)
 import System.Environment (lookupEnv)
 
@@ -33,22 +29,23 @@ data S3Config = S3Config
   , s3Bucket    :: BS.ByteString
   }
 
--- | Our concrete application monad transformer stack.
-newtype AppM a = AppM { runAppM :: ReaderT S3Config IO a }
-  deriving (Functor, Applicative, Monad, MonadIO, MonadReader S3Config)
+-- | Generate a presigned upload URL for the given video ID and TTL.
+--   This is a standalone function, suitable for use from any monad stack.
+generateUploadUrl
+  :: MonadIO m
+  => S3Config
+  -> EntityId Video
+  -> NominalDiffTime
+  -> m Text
+generateUploadUrl cfg (EntityId uuid) ttl = do
+  let objectKey = encodeUtf8 (toText uuid <> ".mkv")
+      ttlSecs   = toSeconds ttl
 
--- | The Adapter: Implementing the Storage port using SigV4 presigned URLs.
-instance MonadStorage AppM where
-  generateUploadUrl (EntityId uuid) ttl = do
-    cfg <- asks id
-    let objectKey = encodeUtf8 (toText uuid <> ".mkv")
-        ttlSecs   = toSeconds ttl
+  now <- liftIO getCurrentTime
+  let expiryTime = addUTCTime (fromIntegral ttlSecs) now
+      url        = buildPresignedUrl cfg objectKey now expiryTime
 
-    now <- liftIO getCurrentTime
-    let expiryTime = addUTCTime (fromIntegral ttlSecs) now
-        url        = buildPresignedUrl cfg objectKey now expiryTime
-
-    return $ decodeUtf8 url
+  return $ decodeUtf8 url
 
 -- | Convert NominalDiffTime to integer seconds.
 toSeconds :: NominalDiffTime -> Int
