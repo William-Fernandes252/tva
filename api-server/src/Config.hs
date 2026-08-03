@@ -16,7 +16,7 @@ import Servant
 
 import Adapters.RabbitMQ (RabbitConfig, initRabbitMQ)
 import Adapters.S3 (S3Config, initMinioEnv)
-import Domain.Core (EntityId, Video)
+import Domain.Core (EntityId, Resolution, Video)
 import Domain.Event (SystemEvent)
 import Domain.Queue (MonadQueue (..))
 import Domain.Storage (MonadStorage (..))
@@ -33,10 +33,10 @@ newtype AppM a = AppM { runAppM :: ReaderT AppConfig IO a }
 
 -- | MonadStorage instance: delegates to the S3 adapter using the config extractor.
 instance MonadStorage AppM where
-  generateUploadUrl :: EntityId Video -> NominalDiffTime -> AppM Text
-  generateUploadUrl videoId ttl = do
+  generateUploadUrl :: EntityId Video -> Resolution -> NominalDiffTime -> AppM Text
+  generateUploadUrl videoId res ttl = do
     s3cfg <- asks appS3Config
-    Adapters.S3.generateUploadUrl s3cfg videoId ttl
+    Adapters.S3.generateUploadUrl s3cfg videoId res ttl
 
 -- | MonadQueue instance: delegates to the RabbitMQ adapter using the config extractor.
 instance MonadQueue SystemEvent AppM where

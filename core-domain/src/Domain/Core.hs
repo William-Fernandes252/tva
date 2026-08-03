@@ -11,7 +11,6 @@ module Domain.Core where
 
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Int (Int32)
-import Data.Kind (Type)
 import Data.Text (Text)
 import Data.UUID (UUID)
 import GHC.Generics (Generic)
@@ -51,6 +50,19 @@ type family RoutingKey (r :: Resolution) :: Symbol where
   RoutingKey 'R1080p = "transcode.high"
   RoutingKey 'R720p = "transcode.med"
   RoutingKey 'R480p = "transcode.low"
+
+-- | Convert a 'Resolution' to a compact text tag for use in object keys.
+resolutionToTag :: Resolution -> Text
+resolutionToTag R1080p = "1080p"
+resolutionToTag R720p = "720p"
+resolutionToTag R480p = "480p"
+
+-- | Parse a compact text tag back to a 'Resolution'.
+resolutionFromTag :: Text -> Maybe Resolution
+resolutionFromTag "1080p" = Just R1080p
+resolutionFromTag "720p" = Just R720p
+resolutionFromTag "480p" = Just R480p
+resolutionFromTag _ = Nothing
 
 -- | Start a video processing job.
 startJob :: EntityId Worker -> VideoJob 'Pending -> VideoJob 'Processing

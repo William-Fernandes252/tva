@@ -15,7 +15,7 @@ import Data.Text (Text)
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Data.Time (NominalDiffTime, UTCTime, diffUTCTime, addUTCTime, getCurrentTime)
 import Data.Time.Format (formatTime, defaultTimeLocale)
-import Domain.Core (EntityId (..))
+import Domain.Core (EntityId (..), Resolution, resolutionToTag)
 import Data.UUID (toText)
 import System.Environment (lookupEnv)
 
@@ -29,16 +29,18 @@ data S3Config = S3Config
   , s3Bucket    :: BS.ByteString
   }
 
--- | Generate a presigned upload URL for the given video ID and TTL.
---   This is a standalone function, suitable for use from any monad stack.
+-- | Generate a presigned upload URL for the given video ID, resolution, and TTL.
+--   Encodes the resolution into the object key: @{uuid}_{resolutionTag}.mkv@.
 generateUploadUrl
   :: MonadIO m
   => S3Config
   -> EntityId Video
+  -> Resolution
   -> NominalDiffTime
   -> m Text
-generateUploadUrl cfg (EntityId uuid) ttl = do
-  let objectKey = encodeUtf8 (toText uuid <> ".mkv")
+generateUploadUrl cfg (EntityId uuid) res ttl = do
+  let tag       = resolutionToTag res
+      objectKey = encodeUtf8 (toText uuid <> "_" <> tag <> ".mkv")
       ttlSecs   = toSeconds ttl
 
   now <- liftIO getCurrentTime
@@ -80,15 +82,12 @@ initMinioEnv = do
 ----------------------------------------------------------------------
 
 -- | Build an AWS SigV4 presigned URL for a PUT object request.
---
---   Implements the AWS Signature Version 4 signing process for
---   query parameter-based presigned URLs (as used by S3/MinIO).
 buildPresignedUrl
   :: S3Config
-  -> BS.ByteString  -- ^ Object key (S3 path)
-  -> UTCTime        -- ^ Request time (now)
-  -> UTCTime        -- ^ Expiry time
-  -> BS.ByteString  -- ^ The complete presigned URL
+  -> BS.ByteString
+  -> UTCTime
+  -> UTCTime
+  -> BS.ByteString
 buildPresignedUrl cfg objectKey now expiry = mconcat
   [ scheme, "://", s3Endpoint cfg, "/", s3Bucket cfg, "/", objectKey
   , "?X-Amz-Algorithm=AWS4-HMAC-SHA256"
