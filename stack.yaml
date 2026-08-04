@@ -1,14 +1,16 @@
 resolver: lts-21.25
+name: tva
+description: Typed Video API - Scalable and highly available video-processing service built with Haskell, Servant, and MinIO.
 packages:
-- .
-- api-server
-- video-worker
-- notifier-worker
+  - .
+  - api-server
+  - video-worker
+  - notifier-worker
 
 extra-deps:
-- rel8-1.6.0.0
-- base16-1.0
-- opaleye-0.10.3.0
-- product-profunctors-0.11.1.1
+  - rel8-1.6.0.0
+  - base16-1.0
+  - opaleye-0.10.3.0
+  - product-profunctors-0.11.1.1
 
 allow-newer: true
