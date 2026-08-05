@@ -14,6 +14,15 @@ language: GHC2021
 dependencies:
 - base >= 4.17 && < 5
 - tva-core-domain
+- rel8
+- hasql
+- amqp
+- aeson
+- text
+- uuid
+- mtl
+- bytestring
+- time
 
 executables:
   tva-video-worker:

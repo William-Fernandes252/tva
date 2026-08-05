@@ -27,6 +27,8 @@ dependencies:
 - time
 - bytestring
 - amqp
+- hasql
+- rel8
 
 executables:
   tva-api-server:
@@ -35,6 +37,7 @@ executables:
     other-modules:
     - Api
     - Adapters.MockQueue
+    - Adapters.PostgreSQL
     - Adapters.RabbitMQ
     - Adapters.S3
     - Config

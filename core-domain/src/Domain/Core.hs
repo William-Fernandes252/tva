@@ -3,6 +3,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeFamilies #-}
@@ -44,6 +45,7 @@ deriving instance Show (VideoJob s)
 
 -- | Supported video resolutions for transcoding.
 data Resolution = R1080p | R720p | R480p
+  deriving (Show, Eq, Generic, FromJSON, ToJSON)
 
 -- | Map video resolutions to their corresponding routing keys for message queues.
 type family RoutingKey (r :: Resolution) :: Symbol where

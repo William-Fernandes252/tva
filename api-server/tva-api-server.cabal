@@ -21,6 +21,7 @@ executable tva-api-server
   other-modules:
       Api
       Adapters.MockQueue
+      Adapters.PostgreSQL
       Adapters.RabbitMQ
       Adapters.S3
       Config
@@ -35,8 +36,10 @@ executable tva-api-server
     , base16-bytestring
     , bytestring
     , crypton
+    , hasql
     , memory
     , mtl
+    , rel8
     , servant
     , servant-server
     , text

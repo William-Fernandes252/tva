@@ -15,7 +15,7 @@ import Data.Text (Text)
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Data.Time (NominalDiffTime, UTCTime, diffUTCTime, addUTCTime, getCurrentTime)
 import Data.Time.Format (formatTime, defaultTimeLocale)
-import Domain.Core (EntityId (..), Resolution, resolutionToTag)
+import Domain.Core (EntityId (..), Resolution, Video, resolutionToTag)
 import Data.UUID (toText)
 import System.Environment (lookupEnv)
 

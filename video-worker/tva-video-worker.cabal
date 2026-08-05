@@ -24,6 +24,15 @@ executable tva-video-worker
       ./
   ghc-options: -Wall
   build-depends:
-      base >=4.17 && <5
+      aeson
+    , amqp
+    , base >=4.17 && <5
+    , bytestring
+    , hasql
+    , mtl
+    , rel8
+    , text
+    , time
     , tva-core-domain
+    , uuid
   default-language: GHC2021
