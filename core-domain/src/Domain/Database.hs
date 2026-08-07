@@ -24,6 +24,7 @@ module Domain.Database
     insertPendingJob',
     findVideoJobById',
     updateJobToProcessing',
+    updateJobToPending',
   )
 where
 
@@ -116,10 +117,8 @@ class (Monad m) => MonadDatabase m where
   -- | Transition a 'Pending' job to 'Processing', assigning it to a worker.
   updateJobToProcessing :: EntityId Video -> EntityId Worker -> m ()
 
-----------------------------------------------------------------------
--- Standalone query functions that work with a plain 'Hasql.Connection'.
--- These are the canonical Rel8-based implementations shared by all services.
-----------------------------------------------------------------------
+  -- | Reset a 'Processing' job back to 'Pending' on failure, clearing worker assignment.
+  updateJobToPending :: EntityId Video -> m ()
 
 -- | Insert a new video job with 'Pending' status.
 insertPendingJob' :: Hasql.Connection -> EntityId Video -> Text -> IO ()
@@ -173,6 +172,26 @@ updateJobToProcessing' conn vid worker = do
                   { jobStatus = lit Processing,
                     assignedTo = lit (Just worker),
                     progress = lit (Just 0)
+                  },
+              updateWhere = \_ row -> jobId row ==. lit vid,
+              returning = NoReturning
+            }
+  _ <- Hasql.run (Hasql.statement () (run_ stmt)) conn
+  return ()
+
+-- | Reset a job back to 'Pending', clearing worker assignment and progress.
+updateJobToPending' :: Hasql.Connection -> EntityId Video -> IO ()
+updateJobToPending' conn vid = do
+  let stmt =
+        update
+          Update
+            { target = videoJobTable,
+              from = pure (),
+              set = \_ row ->
+                row
+                  { jobStatus = lit Pending,
+                    assignedTo = lit Nothing,
+                    progress = lit Nothing
                   },
               updateWhere = \_ row -> jobId row ==. lit vid,
               returning = NoReturning

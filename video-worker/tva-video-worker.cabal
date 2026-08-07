@@ -19,6 +19,7 @@ extra-doc-files:
 executable tva-video-worker
   main-is: Main.hs
   other-modules:
+      MinIO
       Paths_tva_video_worker
   hs-source-dirs:
       ./
@@ -27,12 +28,25 @@ executable tva-video-worker
       aeson
     , amqp
     , base >=4.17 && <5
+    , base16-bytestring
     , bytestring
+    , case-insensitive
+    , conduit
+    , crypton
+    , directory
+    , filepath
     , hasql
+    , http-client
+    , http-client-tls
+    , http-conduit
+    , http-types
+    , memory
     , mtl
     , rel8
+    , temporary
     , text
     , time
     , tva-core-domain
+    , typed-process
     , uuid
   default-language: GHC2021

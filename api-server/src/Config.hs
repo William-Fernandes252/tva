@@ -16,7 +16,7 @@ import Data.String (fromString)
 import Data.Text (Text)
 import Data.Time (NominalDiffTime)
 import Domain.Core (EntityId, Resolution, Video, Worker)
-import Domain.Database (MonadDatabase (..), findVideoJobById', insertPendingJob', updateJobToProcessing')
+import Domain.Database (MonadDatabase (..), findVideoJobById', insertPendingJob', updateJobToPending', updateJobToProcessing')
 import Domain.Event (SystemEvent)
 import Domain.Queue (MonadQueue (..))
 import Domain.Storage (MonadStorage (..))
@@ -65,6 +65,10 @@ instance MonadDatabase AppM where
   updateJobToProcessing vid worker = do
     conn <- asks appDbConn
     liftIO $ Domain.Database.updateJobToProcessing' conn vid worker
+
+  updateJobToPending vid = do
+    conn <- asks appDbConn
+    liftIO $ Domain.Database.updateJobToPending' conn vid
 
 -- | Initialize all infrastructure and return a unified 'AppConfig'.
 initAppConfig :: IO AppConfig

@@ -6,41 +6,49 @@
 
 module Main where
 
+import Control.Exception (SomeException, try)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (MonadReader, ReaderT, ask, asks, runReaderT)
 import Data.Aeson qualified as Aeson
+import Data.ByteString.Lazy qualified as BL
 import Data.Maybe (fromMaybe)
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding (encodeUtf8)
 import Data.UUID (toText)
 import Data.UUID.V4 (nextRandom)
-import Network.AMQP
-import System.Environment (lookupEnv)
-
-import qualified Hasql.Connection as Hasql (Connection, acquire, settings)
-
-import Domain.Core (EntityId (..), JobState (..), Video, VideoJob (..), Worker, resolutionToTag)
+import Domain.Core (EntityId (..), JobState (..), Resolution (..), Video, VideoJob (..), Worker, resolutionToTag)
 import Domain.Database
-  ( MonadDatabase (..)
-  , AnyVideoJob (MkAnyVideoJob)
-  , insertPendingJob'
-  , findVideoJobById'
-  , updateJobToProcessing'
+  ( AnyVideoJob (MkAnyVideoJob),
+    MonadDatabase (..),
+    findVideoJobById',
+    insertPendingJob',
+    updateJobToPending',
+    updateJobToProcessing',
   )
 import Domain.Event (SystemEvent (..))
 import Domain.Queue (MonadQueue (..))
+import Hasql.Connection qualified as Hasql (Connection, acquire, settings)
+import MinIO (MinioConfig (..), downloadObject, initMinIO, uploadObject)
+import Network.AMQP
+import System.Directory (listDirectory, removeDirectoryRecursive)
+import System.Environment (lookupEnv)
+import System.FilePath (takeExtension, (</>))
+import System.IO.Temp (createTempDirectory)
+import System.Process.Typed (proc, runProcess_)
 
 -- | Configuration for the video worker, bundling all infrastructure handles.
 data WorkerConfig = WorkerConfig
-  { wDbConn      :: Hasql.Connection
-  , wRabbitConn  :: Connection
-  , wRabbitChan  :: Channel
-  , wWorkerId    :: EntityId Worker
+  { wDbConn :: Hasql.Connection,
+    wRabbitConn :: Connection,
+    wRabbitChan :: Channel,
+    wWorkerId :: EntityId Worker,
+    wMinio :: MinioConfig
   }
 
 -- | The concrete monad stack for the video worker.
-newtype WorkerM a = WorkerM { runWorkerM :: ReaderT WorkerConfig IO a }
+newtype WorkerM a = WorkerM {runWorkerM :: ReaderT WorkerConfig IO a}
   deriving (Functor, Applicative, Monad, MonadIO, MonadReader WorkerConfig)
 
 -- | Action to set up the queue and start consuming. This blocks until the
@@ -50,12 +58,14 @@ setupConsumer cfg handler = do
   let chan = wRabbitChan cfg
 
   -- Declare a durable queue for video upload events.
-  declareQueue chan newQueue
-    { queueName       = "video_upload_queue"
-    , queueDurable    = True
-    , queueExclusive  = False
-    , queueAutoDelete = False
-    }
+  declareQueue
+    chan
+    newQueue
+      { queueName = "video_upload_queue",
+        queueDurable = True,
+        queueExclusive = False,
+        queueAutoDelete = False
+      }
 
   -- Bind to the topic exchange with the "video.uploaded" routing key.
   bindQueue chan "video_upload_queue" "video_exchange" "video.uploaded"
@@ -82,13 +92,14 @@ instance MonadQueue SystemEvent WorkerM where
     chan <- asks wRabbitChan
     let payload = Aeson.encode event
         rKey = case event of
-          VideoUploadedEvent _ _   -> "video.uploaded"
+          VideoUploadedEvent _ _ -> "video.uploaded"
           TranscodeFinishedEvent _ _ -> "video.finished"
-          TranscodeFailedEvent _ _  -> "video.failed"
-        message = newMsg
-          { msgBody = payload
-          , msgDeliveryMode = Just Persistent
-          }
+          TranscodeFailedEvent _ _ -> "video.failed"
+        message =
+          newMsg
+            { msgBody = payload,
+              msgDeliveryMode = Just Persistent
+            }
     liftIO $ do
       _ <- publishMsg chan "video_exchange" rKey message
       return ()
@@ -111,32 +122,139 @@ instance MonadDatabase WorkerM where
     conn <- asks wDbConn
     liftIO $ Domain.Database.updateJobToProcessing' conn vid worker
 
+  updateJobToPending vid = do
+    conn <- asks wDbConn
+    liftIO $ Domain.Database.updateJobToPending' conn vid
+
 -- | Handle an incoming system event.
 handleEvent :: SystemEvent -> WorkerM ()
 handleEvent (VideoUploadedEvent vid res) = do
   workerId <- asks wWorkerId
-  liftIO $ putStrLn $
-    "[INFO] Received VideoUploadedEvent { videoId: " <> T.unpack (toText' vid)
-    <> ", resolution: " <> T.unpack (resolutionToTag res) <> " }"
+  liftIO $
+    putStrLn $
+      "[INFO] Received VideoUploadedEvent { videoId: "
+        <> T.unpack (toText' vid)
+        <> ", resolution: "
+        <> T.unpack (resolutionToTag res)
+        <> " }"
 
   mJob <- findVideoJobById vid
   case mJob of
-    Just (MkAnyVideoJob (QueuedJob _ _)) -> do
+    Just (MkAnyVideoJob (QueuedJob _ sourceKey)) -> do
       liftIO $ putStrLn "[INFO] Found Pending job. Transitioning to Processing..."
       updateJobToProcessing vid workerId
-      liftIO $ putStrLn "[INFO] Job updated to Processing."
+      liftIO $ putStrLn "[INFO] Starting transcode..."
+      result <- transcodeVideo vid res sourceKey
+      case result of
+        Right outputPaths -> do
+          liftIO $ putStrLn $ "[INFO] Transcode succeeded. Output paths: " <> show outputPaths
+          -- Publish success event (updateJobToCompleted will be added in a future step;
+          -- for now the event notifies downstream consumers)
+          publish $ TranscodeFinishedEvent vid outputPaths
+        Left err -> do
+          liftIO $ putStrLn $ "[ERROR] Transcode failed: " <> T.unpack err
+          updateJobToPending vid
+          publish $ TranscodeFailedEvent vid err
     Just (MkAnyVideoJob _) ->
       liftIO $ putStrLn "[WARN] Job is not in Pending state. Skipping."
     Nothing ->
       liftIO $ putStrLn "[WARN] No job found for this video ID. Skipping."
-
 handleEvent (TranscodeFinishedEvent _vid _chunks) =
   liftIO $ putStrLn "[INFO] Received TranscodeFinishedEvent (not yet handled)."
-
 handleEvent (TranscodeFailedEvent _vid _err) =
   liftIO $ putStrLn "[INFO] Received TranscodeFailedEvent (not yet handled)."
 
--- | Extract the UUID text from an EntityId for logging.
+-- | Map a resolution to an FFmpeg scale filter.
+resolutionToScale :: Resolution -> Text
+resolutionToScale R1080p = "scale=1920:1080"
+resolutionToScale R720p = "scale=1280:720"
+resolutionToScale R480p = "scale=854:480"
+
+-- | Transcode a video: download from MinIO, run FFmpeg, upload HLS segments.
+--   Returns 'Right [outputPaths]' on success, 'Left errorMsg' on failure.
+transcodeVideo ::
+  EntityId Video ->
+  Resolution ->
+  -- | Source object key in MinIO
+  Text ->
+  WorkerM (Either Text [Text])
+transcodeVideo vid res sourceKey = do
+  minioCfg <- asks wMinio
+  let tag = resolutionToTag res
+      uuidText = toText' vid
+      outputPrefix = uuidText <> "_" <> tag
+      outputKeyPrefix = encodeUtf8 outputPrefix
+      scale = resolutionToScale res
+
+  result <- liftIO $ try @SomeException $ do
+    -- Create a temp directory for the transcode output
+    tmpDir <- createTempDirectory "/tmp" "tva-transcode"
+
+    -- Stream-download the source video from MinIO into a temp file
+    let inputFile = tmpDir </> "input.mkv"
+    videoBytes <- downloadObject minioCfg (encodeUtf8 sourceKey)
+    BL.writeFile inputFile videoBytes
+    putStrLn $ "[INFO] Downloaded source video to " <> inputFile
+
+    -- Run FFmpeg: transcode to HLS
+    let outputPattern = tmpDir </> "segment_%03d.ts"
+        outputPlaylist = tmpDir </> "output.m3u8"
+    runProcess_ $
+      proc
+        "ffmpeg"
+        [ "-i",
+          inputFile,
+          "-c:v",
+          "libx264",
+          "-preset",
+          "fast",
+          "-crf",
+          "23",
+          "-c:a",
+          "aac",
+          "-b:a",
+          "128k",
+          "-vf",
+          T.unpack scale,
+          "-f",
+          "hls",
+          "-hls_time",
+          "10",
+          "-hls_list_size",
+          "0",
+          "-hls_segment_filename",
+          outputPattern,
+          outputPlaylist
+        ]
+    putStrLn "[INFO] FFmpeg transcode complete."
+
+    -- Upload all output files to MinIO
+    files <- listDirectory tmpDir
+    let outputFiles = filter (\f -> takeExtension f `elem` [".m3u8", ".ts"]) files
+    mapM_
+      ( \f -> do
+          let localPath = tmpDir </> f
+              objectKey = outputKeyPrefix <> "/" <> encodeUtf8 (T.pack f)
+          uploadObject minioCfg objectKey localPath
+          putStrLn $ "[INFO] Uploaded " <> f <> " to MinIO"
+      )
+      outputFiles
+
+    -- Build the list of output paths (relative keys in the processed bucket)
+    let outputPaths = map (\f -> outputPrefix <> "/" <> T.pack f) outputFiles
+
+    -- Clean up temp directory
+    removeDirectoryRecursive tmpDir
+
+    return outputPaths
+
+  case result of
+    Left (e :: SomeException) ->
+      return $ Left $ T.pack (show e)
+    Right paths ->
+      return $ Right paths
+
+-- | Extract the UUID text from an EntityId.
 toText' :: EntityId a -> Text
 toText' (EntityId u) = toText u
 
@@ -150,52 +268,62 @@ main = do
   let pgPort = fromMaybe 5432 (mPgPort >>= readMaybe)
   pgUser <- fromMaybe "video_user" <$> lookupEnv "PG_USER"
   pgPass <- fromMaybe "video_password" <$> lookupEnv "PG_PASS"
-  pgDb   <- fromMaybe "video_db" <$> lookupEnv "PG_DB"
-  let connSettings = Hasql.settings
-        (fromString pgHost)
-        (fromIntegral pgPort)
-        (fromString pgUser)
-        (fromString pgPass)
-        (fromString pgDb)
+  pgDb <- fromMaybe "video_db" <$> lookupEnv "PG_DB"
+  let connSettings =
+        Hasql.settings
+          (fromString pgHost)
+          (fromIntegral pgPort)
+          (fromString pgUser)
+          (fromString pgPass)
+          (fromString pgDb)
   result <- Hasql.acquire connSettings
   dbConn <- case result of
     Left err -> error $ "Failed to connect to PostgreSQL: " ++ show err
-    Right c  -> return c
-  putStrLn $ "Connected to PostgreSQL at " <> pgHost <> ":" <> show pgPort
+    Right c -> return c
+  putStrLn $ "Connected to PostgreSQL at " ++ pgHost ++ ":" ++ show pgPort
 
   -- Initialize RabbitMQ connection.
-  mqHost  <- fromMaybe "127.0.0.1" <$> lookupEnv "RABBITMQ_HOST"
-  mqUser  <- fromMaybe "mq_user"    <$> lookupEnv "RABBITMQ_USER"
-  mqPass  <- fromMaybe "mq_password" <$> lookupEnv "RABBITMQ_PASS"
-  mqVhost <- fromMaybe "/"           <$> lookupEnv "RABBITMQ_VHOST"
+  mqHost <- fromMaybe "127.0.0.1" <$> lookupEnv "RABBITMQ_HOST"
+  mqUser <- fromMaybe "mq_user" <$> lookupEnv "RABBITMQ_USER"
+  mqPass <- fromMaybe "mq_password" <$> lookupEnv "RABBITMQ_PASS"
+  mqVhost <- fromMaybe "/" <$> lookupEnv "RABBITMQ_VHOST"
   conn <- openConnection mqHost (T.pack mqVhost) (T.pack mqUser) (T.pack mqPass)
   chan <- openChannel conn
 
   -- Declare the topic exchange (idempotent — fine if api-server already did it).
-  declareExchange chan newExchange
-    { exchangeName    = "video_exchange"
-    , exchangeType    = "topic"
-    , exchangeDurable = True
-    }
-  putStrLn $ "Connected to RabbitMQ at " <> mqHost
+  declareExchange
+    chan
+    newExchange
+      { exchangeName = "video_exchange",
+        exchangeType = "topic",
+        exchangeDurable = True
+      }
+  putStrLn $ "Connected to RabbitMQ at " ++ mqHost
 
   -- Generate a random worker ID.
   workerUuid <- nextRandom
   let workerId = EntityId workerUuid :: EntityId Worker
   putStrLn $ "Worker ID: " <> show workerUuid
 
-  let cfg = WorkerConfig
-        { wDbConn      = dbConn
-        , wRabbitConn  = conn
-        , wRabbitChan  = chan
-        , wWorkerId    = workerId
-        }
+  -- Initialize MinIO connection.
+  putStrLn "Initializing MinIO connection..."
+  minioCfg <- initMinIO
+  putStrLn "MinIO connection initialized."
+
+  let cfg =
+        WorkerConfig
+          { wDbConn = dbConn,
+            wRabbitConn = conn,
+            wRabbitChan = chan,
+            wWorkerId = workerId,
+            wMinio = minioCfg
+          }
 
   -- Run the consumer loop (blocks until interrupted).
   runReaderT (runWorkerM (consume handleEvent)) cfg
 
 -- | Parse an integer from a string, returning Nothing on failure.
-readMaybe :: Read a => String -> Maybe a
+readMaybe :: (Read a) => String -> Maybe a
 readMaybe s = case reads s of
   [(x, "")] -> Just x
-  _         -> Nothing
+  _ -> Nothing

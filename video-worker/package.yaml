@@ -7,22 +7,35 @@ license-file: ../LICENSE
 author: William Fernandes Dias
 maintainer: william.winchester1967@gmail.com
 extra-doc-files:
-- ../CHANGELOG.md
+  - ../CHANGELOG.md
 
 language: GHC2021
 
 dependencies:
-- base >= 4.17 && < 5
-- tva-core-domain
-- rel8
-- hasql
-- amqp
-- aeson
-- text
-- uuid
-- mtl
-- bytestring
-- time
+  - base >= 4.17 && < 5
+  - tva-core-domain
+  - rel8
+  - hasql
+  - amqp
+  - aeson
+  - text
+  - uuid
+  - mtl
+  - bytestring
+  - time
+  - conduit
+  - http-conduit
+  - typed-process
+  - temporary
+  - directory
+  - filepath
+  - crypton
+  - memory
+  - base16-bytestring
+  - http-client
+  - http-client-tls
+  - http-types
+  - case-insensitive
 
 executables:
   tva-video-worker:
