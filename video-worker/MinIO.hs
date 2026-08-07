@@ -40,13 +40,15 @@ data MinioConfig = MinioConfig
     minioRegion :: BS.ByteString,
     minioEndpoint :: BS.ByteString,
     minioSecure :: Bool,
-    minioBucket :: BS.ByteString
+    minioBucket :: BS.ByteString,
+    minioOutputBucket :: BS.ByteString
   }
 
 initMinIO :: IO MinioConfig
 initMinIO = do
   endpointStr <- fromMaybe "http://localhost:9000" <$> lookupEnv "MINIO_ENDPOINT"
   bucketStr <- fromMaybe "raw-videos" <$> lookupEnv "MINIO_BUCKET"
+  outputBucket <- fromMaybe "processed-videos" <$> lookupEnv "MINIO_OUTPUT_BUCKET"
   accessKey <- fromMaybe "minio_admin" <$> lookupEnv "MINIO_ACCESS_KEY"
   secretKey <- fromMaybe "minio_password" <$> lookupEnv "MINIO_SECRET_KEY"
   region <- fromMaybe "us-east-1" <$> lookupEnv "MINIO_REGION"
@@ -64,7 +66,8 @@ initMinIO = do
         minioRegion = B8.pack region,
         minioEndpoint = B8.pack authority,
         minioSecure = secure,
-        minioBucket = B8.pack bucketStr
+        minioBucket = B8.pack bucketStr,
+        minioOutputBucket = B8.pack outputBucket
       }
 
 ----------------------------------------------------------------------
@@ -142,12 +145,12 @@ downloadObject ::
   (MonadIO m) =>
   MinioConfig ->
   BS.ByteString ->
+  BS.ByteString ->
   m BL.ByteString
-downloadObject cfg objectKey = liftIO $ do
+downloadObject cfg bucket objectKey = liftIO $ do
   now <- getCurrentTime
   let scheme = if minioSecure cfg then "https" else "http"
       host = minioEndpoint cfg
-      bucket = minioBucket cfg
       uri = "/" <> bucket <> "/" <> objectKey
       url = scheme <> "://" <> host <> uri
       payloadHash = hexHash BS.empty
@@ -169,14 +172,14 @@ uploadObject ::
   (MonadIO m) =>
   MinioConfig ->
   BS.ByteString ->
+  BS.ByteString ->
   FilePath ->
   m ()
-uploadObject cfg objectKey filePath = liftIO $ do
+uploadObject cfg bucket objectKey filePath = liftIO $ do
   fileBytes <- BL.readFile filePath
   now <- getCurrentTime
   let scheme = if minioSecure cfg then "https" else "http"
       host = minioEndpoint cfg
-      bucket = minioBucket cfg
       uri = "/" <> bucket <> "/" <> objectKey
       url = scheme <> "://" <> host <> uri
       payloadHash = hexHash (BL.toStrict fileBytes)

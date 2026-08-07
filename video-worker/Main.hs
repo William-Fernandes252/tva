@@ -18,12 +18,13 @@ import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
 import Data.UUID (toText)
 import Data.UUID.V4 (nextRandom)
-import Domain.Core (EntityId (..), JobState (..), Resolution (..), Video, VideoJob (..), Worker, resolutionToTag)
+import Domain.Core (EntityId (..), JobState (..), Resolution (..), Video, VideoJob (..), Worker, finishJob, resolutionToTag)
 import Domain.Database
   ( AnyVideoJob (MkAnyVideoJob),
     MonadDatabase (..),
     findVideoJobById',
     insertPendingJob',
+    updateJobToCompleted',
     updateJobToPending',
     updateJobToProcessing',
   )
@@ -126,6 +127,10 @@ instance MonadDatabase WorkerM where
     conn <- asks wDbConn
     liftIO $ Domain.Database.updateJobToPending' conn vid
 
+  updateJobToCompleted vid chunks = do
+    conn <- asks wDbConn
+    liftIO $ Domain.Database.updateJobToCompleted' conn vid chunks
+
 -- | Handle an incoming system event.
 handleEvent :: SystemEvent -> WorkerM ()
 handleEvent (VideoUploadedEvent vid res) = do
@@ -147,9 +152,11 @@ handleEvent (VideoUploadedEvent vid res) = do
       result <- transcodeVideo vid res sourceKey
       case result of
         Right outputPaths -> do
-          liftIO $ putStrLn $ "[INFO] Transcode succeeded. Output paths: " <> show outputPaths
-          -- Publish success event (updateJobToCompleted will be added in a future step;
-          -- for now the event notifies downstream consumers)
+          liftIO $ putStrLn $ "[INFO] Transcode succeeded. Output paths: " ++ show outputPaths
+          updateJobToCompleted vid outputPaths
+          -- Validate with the domain model's FinishedJob constructor
+          let validated = finishJob outputPaths (RunningJob vid workerId 0)
+          liftIO $ putStrLn $ "[INFO] Validated FinishedJob: " ++ show validated
           publish $ TranscodeFinishedEvent vid outputPaths
         Left err -> do
           liftIO $ putStrLn $ "[ERROR] Transcode failed: " <> T.unpack err
@@ -170,82 +177,71 @@ resolutionToScale R1080p = "scale=1920:1080"
 resolutionToScale R720p = "scale=1280:720"
 resolutionToScale R480p = "scale=854:480"
 
--- | Transcode a video: download from MinIO, run FFmpeg, upload HLS segments.
---   Returns 'Right [outputPaths]' on success, 'Left errorMsg' on failure.
+-- | Transcode a video: download from MinIO, run FFmpeg to produce HLS chunks,
+--   upload segments organized by resolution, return output paths.
 transcodeVideo ::
   EntityId Video ->
   Resolution ->
-  -- | Source object key in MinIO
   Text ->
   WorkerM (Either Text [Text])
 transcodeVideo vid res sourceKey = do
   minioCfg <- asks wMinio
   let tag = resolutionToTag res
       uuidText = toText' vid
-      outputPrefix = uuidText <> "_" <> tag
-      outputKeyPrefix = encodeUtf8 outputPrefix
+      -- Output directory: "{uuid}/{resolution}/"
+      outputDir = uuidText <> "/" <> tag
       scale = resolutionToScale res
+      inputBucket = minioBucket minioCfg          -- "raw-videos"
+      outputBucket = minioOutputBucket minioCfg    -- "processed-videos"
 
   result <- liftIO $ try @SomeException $ do
-    -- Create a temp directory for the transcode output
     tmpDir <- createTempDirectory "/tmp" "tva-transcode"
 
-    -- Stream-download the source video from MinIO into a temp file
+    -- Download source video from raw-videos bucket
     let inputFile = tmpDir </> "input.mkv"
-    videoBytes <- downloadObject minioCfg (encodeUtf8 sourceKey)
+    videoBytes <- downloadObject minioCfg inputBucket (encodeUtf8 sourceKey)
     BL.writeFile inputFile videoBytes
     putStrLn $ "[INFO] Downloaded source video to " <> inputFile
 
-    -- Run FFmpeg: transcode to HLS
-    let outputPattern = tmpDir </> "segment_%03d.ts"
+    -- FFmpeg: transcode to HLS with proper chunking
+    --   -force_key_frames ensures clean segment boundaries every 2 seconds
+    --   -hls_time 6: 6-second segments
+    --   -hls_segment_type mpegts for broad compatibility
+    let segmentPattern = tmpDir </> "segment_%03d.ts"
         outputPlaylist = tmpDir </> "output.m3u8"
     runProcess_ $
-      proc
-        "ffmpeg"
-        [ "-i",
-          inputFile,
-          "-c:v",
-          "libx264",
-          "-preset",
-          "fast",
-          "-crf",
-          "23",
-          "-c:a",
-          "aac",
-          "-b:a",
-          "128k",
-          "-vf",
-          T.unpack scale,
-          "-f",
-          "hls",
-          "-hls_time",
-          "10",
-          "-hls_list_size",
-          "0",
-          "-hls_segment_filename",
-          outputPattern,
+      proc "ffmpeg"
+        [ "-i", inputFile,
+          "-c:v", "libx264",
+          "-preset", "fast",
+          "-crf", "23",
+          "-force_key_frames", "expr:gte(t,n_forced*2)",
+          "-c:a", "aac",
+          "-b:a", "128k",
+          "-vf", T.unpack scale,
+          "-f", "hls",
+          "-hls_time", "6",
+          "-hls_list_size", "0",
+          "-hls_segment_type", "mpegts",
+          "-hls_segment_filename", segmentPattern,
           outputPlaylist
         ]
-    putStrLn "[INFO] FFmpeg transcode complete."
+    putStrLn "[INFO] FFmpeg HLS transcode complete."
 
-    -- Upload all output files to MinIO
+    -- Collect and upload all HLS output files to processed-videos bucket
     files <- listDirectory tmpDir
     let outputFiles = filter (\f -> takeExtension f `elem` [".m3u8", ".ts"]) files
-    mapM_
-      ( \f -> do
-          let localPath = tmpDir </> f
-              objectKey = outputKeyPrefix <> "/" <> encodeUtf8 (T.pack f)
-          uploadObject minioCfg objectKey localPath
-          putStrLn $ "[INFO] Uploaded " <> f <> " to MinIO"
-      )
-      outputFiles
+    mapM_ (\f -> do
+      let localPath = tmpDir </> f
+          objectKey = encodeUtf8 outputDir <> "/" <> encodeUtf8 (T.pack f)
+      uploadObject minioCfg outputBucket objectKey localPath
+      putStrLn $ "[INFO] Uploaded " <> f <> " to MinIO (" <> T.unpack outputDir <> ")"
+      ) outputFiles
 
-    -- Build the list of output paths (relative keys in the processed bucket)
-    let outputPaths = map (\f -> outputPrefix <> "/" <> T.pack f) outputFiles
+    -- Build the list of output paths for the 'FinishedJob' constructor
+    let outputPaths = map (\f -> outputDir <> "/" <> T.pack f) outputFiles
 
-    -- Clean up temp directory
     removeDirectoryRecursive tmpDir
-
     return outputPaths
 
   case result of
@@ -280,7 +276,7 @@ main = do
   dbConn <- case result of
     Left err -> error $ "Failed to connect to PostgreSQL: " ++ show err
     Right c -> return c
-  putStrLn $ "Connected to PostgreSQL at " ++ pgHost ++ ":" ++ show pgPort
+  putStrLn $ "Connected to PostgreSQL at " ++ pgHost ++ ":" ++ show (pgPort :: Int)
 
   -- Initialize RabbitMQ connection.
   mqHost <- fromMaybe "127.0.0.1" <$> lookupEnv "RABBITMQ_HOST"

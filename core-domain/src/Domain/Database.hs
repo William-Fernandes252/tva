@@ -25,6 +25,7 @@ module Domain.Database
     findVideoJobById',
     updateJobToProcessing',
     updateJobToPending',
+    updateJobToCompleted',
   )
 where
 
@@ -120,6 +121,9 @@ class (Monad m) => MonadDatabase m where
   -- | Reset a 'Processing' job back to 'Pending' on failure, clearing worker assignment.
   updateJobToPending :: EntityId Video -> m ()
 
+  -- | Mark a job as 'Completed', storing the HLS output chunk paths.
+  updateJobToCompleted :: EntityId Video -> [Text] -> m ()
+
 -- | Insert a new video job with 'Pending' status.
 insertPendingJob' :: Hasql.Connection -> EntityId Video -> Text -> IO ()
 insertPendingJob' conn vid source = do
@@ -192,6 +196,25 @@ updateJobToPending' conn vid = do
                   { jobStatus = lit Pending,
                     assignedTo = lit Nothing,
                     progress = lit Nothing
+                  },
+              updateWhere = \_ row -> jobId row ==. lit vid,
+              returning = NoReturning
+            }
+  _ <- Hasql.run (Hasql.statement () (run_ stmt)) conn
+  return ()
+
+-- | Mark a job as completed, storing the HLS output chunk paths.
+updateJobToCompleted' :: Hasql.Connection -> EntityId Video -> [Text] -> IO ()
+updateJobToCompleted' conn vid chunks = do
+  let stmt =
+        update
+          Update
+            { target = videoJobTable,
+              from = pure (),
+              set = \_ row ->
+                row
+                  { jobStatus = lit Completed,
+                    outputChunks = lit chunks
                   },
               updateWhere = \_ row -> jobId row ==. lit vid,
               returning = NoReturning
