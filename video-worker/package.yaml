@@ -36,6 +36,7 @@ dependencies:
   - http-client-tls
   - http-types
   - case-insensitive
+  - containers
 
 executables:
   tva-video-worker:

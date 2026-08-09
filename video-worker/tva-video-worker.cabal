@@ -32,6 +32,7 @@ executable tva-video-worker
     , bytestring
     , case-insensitive
     , conduit
+    , containers
     , crypton
     , directory
     , filepath

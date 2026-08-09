@@ -1,5 +1,6 @@
 {-# LANGUAGE DisambiguateRecordFields #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
@@ -22,7 +23,7 @@ import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
 import Data.UUID (toText)
 import Data.UUID.V4 (nextRandom)
-import Domain.Core (EntityId (..), JobState (..), Resolution (..), Video, VideoJob (..), Worker, finishJob, resolutionToTag)
+import Domain.Core (EntityId (..), Resolution (..), Video, VideoJob (..), Worker, finishJob, resolutionToTag)
 import Domain.Database
   ( AnyVideoJob (MkAnyVideoJob),
     MonadDatabase (..),
@@ -50,30 +51,28 @@ data WorkerConfig = WorkerConfig
     wRabbitConn :: Connection,
     wRabbitChan :: Channel,
     wWorkerId :: EntityId Worker,
-    wMinio :: MinioConfig
+    wMinio :: MinioConfig,
+    wRetry :: RetryConfig
+  }
+
+-- | Retry and backoff settings, configurable via environment variables.
+data RetryConfig = RetryConfig
+  { retryMaxAttempts :: Int,
+    retryBaseDelaySeconds :: Int,
+    retryMaxDelaySeconds :: Int
   }
 
 -- | The concrete monad stack for the video worker.
 newtype WorkerM a = WorkerM {runWorkerM :: ReaderT WorkerConfig IO a}
   deriving (Functor, Applicative, Monad, MonadIO, MonadReader WorkerConfig)
 
-
-maxRetries :: Int
-maxRetries = 3
-
-baseDelaySeconds :: Int
-baseDelaySeconds = 5
-
-maxDelaySeconds :: Int
-maxDelaySeconds = 60
-
 retryHeaderName :: Text
 retryHeaderName = "x-retry-count"
 
 -- | Compute exponential backoff delay in microseconds.
-backoffDelay :: Int -> Int
-backoffDelay retryCount =
-  let seconds = min (2 ^ retryCount * baseDelaySeconds) maxDelaySeconds
+backoffDelay :: RetryConfig -> Int -> Int
+backoffDelay cfg retryCount =
+  let seconds = min (2 ^ retryCount * retryBaseDelaySeconds cfg) (retryMaxDelaySeconds cfg)
    in seconds * 1_000_000
 
 -- | Parse the retry count from a message's headers.
@@ -81,7 +80,7 @@ getRetryCount :: Message -> Int
 getRetryCount msg = fromMaybe 0 $ do
   FieldTable headers <- msgHeaders msg
   FVString val <- Map.lookup retryHeaderName headers
-  readMaybe (T.unpack val)
+  readMaybe (B8.unpack val)
 
 -- | Set the retry count header on a message.
 setRetryHeader :: Int -> Message -> Message
@@ -90,7 +89,7 @@ setRetryHeader n msg =
   where
     FieldTable existing = fromMaybe (FieldTable Map.empty) (msgHeaders msg)
     cleaned = Map.delete retryHeaderName existing
-    newHeaders = Map.insert retryHeaderName (FVString (T.pack (show n))) cleaned
+    newHeaders = Map.insert retryHeaderName (FVString (B8.pack (show n))) cleaned
 
 dlxName :: Text
 dlxName = "video_dlx"
@@ -109,14 +108,15 @@ setupDeadLetterInfrastructure chan = do
         exchangeDurable = True
       }
 
-  declareQueue
-    chan
-    newQueue
-      { queueName = dlqName,
-        queueDurable = True,
-        queueExclusive = False,
-        queueAutoDelete = False
-      }
+  _ <-
+    declareQueue
+      chan
+      newQueue
+        { queueName = dlqName,
+          queueDurable = True,
+          queueExclusive = False,
+          queueAutoDelete = False
+        }
 
   bindQueue chan dlqName dlxName "#"
 
@@ -127,7 +127,7 @@ setupDeadLetterInfrastructure chan = do
 -- | Route a message to the dead-letter queue (after max retries).
 sendToDLQ :: Channel -> Message -> IO ()
 sendToDLQ chan msg = do
-  publishMsg chan dlxName "#" msg
+  _ <- publishMsg chan dlxName "#" msg
   putStrLn "[WARN] Message sent to dead-letter queue (max retries exhausted)."
 
 -- | Action to set up the queue and start consuming. Uses manual ack/nack
@@ -135,18 +135,21 @@ sendToDLQ chan msg = do
 setupConsumer :: WorkerConfig -> (SystemEvent -> WorkerM (Either Text ())) -> IO ()
 setupConsumer cfg handler = do
   let chan = wRabbitChan cfg
+      retryCfg = wRetry cfg
+      maxRetries = retryMaxAttempts retryCfg
 
   setupDeadLetterInfrastructure chan
 
   -- Declare main queue
-  declareQueue
-    chan
-    newQueue
-      { queueName = "video_upload_queue",
-        queueDurable = True,
-        queueExclusive = False,
-        queueAutoDelete = False
-      }
+  _ <-
+    declareQueue
+      chan
+      newQueue
+        { queueName = "video_upload_queue",
+          queueDurable = True,
+          queueExclusive = False,
+          queueAutoDelete = False
+        }
 
   bindQueue chan "video_upload_queue" "video_exchange" "video.uploaded"
 
@@ -173,7 +176,7 @@ setupConsumer cfg handler = do
             putStrLn $ "[WARN] Processing failed (retry " <> show retryCount <> "/" <> show maxRetries <> "): " <> T.unpack errMsg
             if retryCount < maxRetries
               then do
-                let delay = backoffDelay retryCount
+                let delay = backoffDelay retryCfg retryCount
                     delaySecs = delay `div` 1_000_000
                 putStrLn $ "[INFO] Retrying in " <> show delaySecs <> "s (exponential backoff)..."
                 threadDelay delay
@@ -182,7 +185,7 @@ setupConsumer cfg handler = do
                       (setRetryHeader (retryCount + 1) msg)
                         { msgDeliveryMode = Just Persistent
                         }
-                publishMsg chan "video_exchange" "video.uploaded" retryMsg
+                _ <- publishMsg chan "video_exchange" "video.uploaded" retryMsg
                 ackEnv env
               else do
                 putStrLn "[ERROR] Max retries exhausted. Routing to DLQ."
@@ -431,17 +434,36 @@ main = do
   minioCfg <- initMinIO
   putStrLn "MinIO connection initialized."
 
+  -- Initialize retry / backoff configuration from environment.
+  mMaxAttempts <- lookupEnv "RETRY_MAX_ATTEMPTS"
+  let retryMaxAttempts = fromMaybe 3 (mMaxAttempts >>= readMaybe)
+  mBaseDelay <- lookupEnv "RETRY_BASE_DELAY_SECONDS"
+  let retryBaseDelaySeconds = fromMaybe 5 (mBaseDelay >>= readMaybe)
+  mMaxDelay <- lookupEnv "RETRY_MAX_DELAY_SECONDS"
+  let retryMaxDelaySeconds = fromMaybe 60 (mMaxDelay >>= readMaybe)
+  let retryCfg = RetryConfig {retryMaxAttempts, retryBaseDelaySeconds, retryMaxDelaySeconds}
+  putStrLn $
+    "Retry config: maxAttempts="
+      <> show retryMaxAttempts
+      <> " baseDelay="
+      <> show retryBaseDelaySeconds
+      <> "s"
+      <> " maxDelay="
+      <> show retryMaxDelaySeconds
+      <> "s"
+
   let cfg =
         WorkerConfig
           { wDbConn = dbConn,
             wRabbitConn = conn,
             wRabbitChan = chan,
             wWorkerId = workerId,
-            wMinio = minioCfg
+            wMinio = minioCfg,
+            wRetry = retryCfg
           }
 
   -- Run the consumer loop (blocks until interrupted).
-  runReaderT (runWorkerM (consume handleEvent)) cfg
+  setupConsumer cfg handleEvent
 
 -- | Parse an integer from a string, returning Nothing on failure.
 readMaybe :: (Read a) => String -> Maybe a
