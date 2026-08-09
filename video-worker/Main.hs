@@ -1,16 +1,20 @@
 {-# LANGUAGE DisambiguateRecordFields #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Main where
 
+import Control.Concurrent (threadDelay)
 import Control.Exception (SomeException, try)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (MonadReader, ReaderT, ask, asks, runReaderT)
 import Data.Aeson qualified as Aeson
+import Data.ByteString.Char8 qualified as B8
 import Data.ByteString.Lazy qualified as BL
+import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.String (fromString)
 import Data.Text (Text)
@@ -33,6 +37,7 @@ import Domain.Queue (MonadQueue (..))
 import Hasql.Connection qualified as Hasql (Connection, acquire, settings)
 import MinIO (MinioConfig (..), downloadObject, initMinIO, uploadObject)
 import Network.AMQP
+import Network.AMQP.Types (FieldTable (FieldTable), FieldValue (FVString))
 import System.Directory (listDirectory, removeDirectoryRecursive)
 import System.Environment (lookupEnv)
 import System.FilePath (takeExtension, (</>))
@@ -52,13 +57,88 @@ data WorkerConfig = WorkerConfig
 newtype WorkerM a = WorkerM {runWorkerM :: ReaderT WorkerConfig IO a}
   deriving (Functor, Applicative, Monad, MonadIO, MonadReader WorkerConfig)
 
--- | Action to set up the queue and start consuming. This blocks until the
---   channel is closed (i.e., runs forever).
-setupConsumer :: WorkerConfig -> (SystemEvent -> WorkerM ()) -> IO ()
+
+maxRetries :: Int
+maxRetries = 3
+
+baseDelaySeconds :: Int
+baseDelaySeconds = 5
+
+maxDelaySeconds :: Int
+maxDelaySeconds = 60
+
+retryHeaderName :: Text
+retryHeaderName = "x-retry-count"
+
+-- | Compute exponential backoff delay in microseconds.
+backoffDelay :: Int -> Int
+backoffDelay retryCount =
+  let seconds = min (2 ^ retryCount * baseDelaySeconds) maxDelaySeconds
+   in seconds * 1_000_000
+
+-- | Parse the retry count from a message's headers.
+getRetryCount :: Message -> Int
+getRetryCount msg = fromMaybe 0 $ do
+  FieldTable headers <- msgHeaders msg
+  FVString val <- Map.lookup retryHeaderName headers
+  readMaybe (T.unpack val)
+
+-- | Set the retry count header on a message.
+setRetryHeader :: Int -> Message -> Message
+setRetryHeader n msg =
+  msg {msgHeaders = Just (FieldTable newHeaders)}
+  where
+    FieldTable existing = fromMaybe (FieldTable Map.empty) (msgHeaders msg)
+    cleaned = Map.delete retryHeaderName existing
+    newHeaders = Map.insert retryHeaderName (FVString (T.pack (show n))) cleaned
+
+dlxName :: Text
+dlxName = "video_dlx"
+
+dlqName :: Text
+dlqName = "video_dlq"
+
+-- | Declare the dead-letter exchange and queue, binding them together.
+setupDeadLetterInfrastructure :: Channel -> IO ()
+setupDeadLetterInfrastructure chan = do
+  declareExchange
+    chan
+    newExchange
+      { exchangeName = dlxName,
+        exchangeType = "topic",
+        exchangeDurable = True
+      }
+
+  declareQueue
+    chan
+    newQueue
+      { queueName = dlqName,
+        queueDurable = True,
+        queueExclusive = False,
+        queueAutoDelete = False
+      }
+
+  bindQueue chan dlqName dlxName "#"
+
+  putStrLn "Dead-letter infrastructure initialized."
+  putStrLn "  DLX: video_dlx"
+  putStrLn "  DLQ: video_dlq"
+
+-- | Route a message to the dead-letter queue (after max retries).
+sendToDLQ :: Channel -> Message -> IO ()
+sendToDLQ chan msg = do
+  publishMsg chan dlxName "#" msg
+  putStrLn "[WARN] Message sent to dead-letter queue (max retries exhausted)."
+
+-- | Action to set up the queue and start consuming. Uses manual ack/nack
+--   with exponential backoff and a dead-letter queue for poison messages.
+setupConsumer :: WorkerConfig -> (SystemEvent -> WorkerM (Either Text ())) -> IO ()
 setupConsumer cfg handler = do
   let chan = wRabbitChan cfg
 
-  -- Declare a durable queue for video upload events.
+  setupDeadLetterInfrastructure chan
+
+  -- Declare main queue
   declareQueue
     chan
     newQueue
@@ -68,7 +148,6 @@ setupConsumer cfg handler = do
         queueAutoDelete = False
       }
 
-  -- Bind to the topic exchange with the "video.uploaded" routing key.
   bindQueue chan "video_upload_queue" "video_exchange" "video.uploaded"
 
   putStrLn "Video worker: waiting for VideoUploadedEvent messages..."
@@ -76,15 +155,39 @@ setupConsumer cfg handler = do
   putStrLn "  exchange: video_exchange"
   putStrLn "  routing key: video.uploaded"
 
-  -- Start consuming. This call blocks.
-  _consumerTag <- consumeMsgs chan "video_upload_queue" Ack $ \(msg, _meta) -> do
+  -- Manual ack mode: we decide when to ack/nack each message
+  _consumerTag <- consumeMsgs chan "video_upload_queue" Ack $ \(msg, env) -> do
     case Aeson.decode (msgBody msg) of
+      Nothing -> do
+        putStrLn "[WARN] Could not decode message body. Sending to DLQ."
+        sendToDLQ chan msg
+        ackEnv env
       Just event -> do
-        let action = handler event
-        _result <- runReaderT (runWorkerM action) cfg
-        return ()
-      Nothing ->
-        putStrLn $ "[WARN] Could not decode message body as SystemEvent"
+        let retryCount = getRetryCount msg
+        result <- runReaderT (runWorkerM (handler event)) cfg
+        case result of
+          Right () -> do
+            putStrLn "[INFO] Message processed successfully. Acking."
+            ackEnv env
+          Left errMsg -> do
+            putStrLn $ "[WARN] Processing failed (retry " <> show retryCount <> "/" <> show maxRetries <> "): " <> T.unpack errMsg
+            if retryCount < maxRetries
+              then do
+                let delay = backoffDelay retryCount
+                    delaySecs = delay `div` 1_000_000
+                putStrLn $ "[INFO] Retrying in " <> show delaySecs <> "s (exponential backoff)..."
+                threadDelay delay
+                -- Publish retry message with incremented count
+                let retryMsg =
+                      (setRetryHeader (retryCount + 1) msg)
+                        { msgDeliveryMode = Just Persistent
+                        }
+                publishMsg chan "video_exchange" "video.uploaded" retryMsg
+                ackEnv env
+              else do
+                putStrLn "[ERROR] Max retries exhausted. Routing to DLQ."
+                sendToDLQ chan msg
+                ackEnv env
   return ()
 
 instance MonadQueue SystemEvent WorkerM where
@@ -108,7 +211,8 @@ instance MonadQueue SystemEvent WorkerM where
   consume :: (SystemEvent -> WorkerM ()) -> WorkerM ()
   consume handler = do
     cfg <- ask
-    liftIO $ setupConsumer cfg handler
+    let handler' e = Right () <$ handler e
+    liftIO $ setupConsumer cfg handler'
 
 instance MonadDatabase WorkerM where
   insertPendingJob vid source = do
@@ -132,7 +236,9 @@ instance MonadDatabase WorkerM where
     liftIO $ Domain.Database.updateJobToCompleted' conn vid chunks
 
 -- | Handle an incoming system event.
-handleEvent :: SystemEvent -> WorkerM ()
+--   Returns 'Right ()' on success (message should be acked).
+--   Returns 'Left errorMsg' on transient failure (consumer will retry/DLQ).
+handleEvent :: SystemEvent -> WorkerM (Either Text ())
 handleEvent (VideoUploadedEvent vid res) = do
   workerId <- asks wWorkerId
   liftIO $
@@ -154,22 +260,26 @@ handleEvent (VideoUploadedEvent vid res) = do
         Right outputPaths -> do
           liftIO $ putStrLn $ "[INFO] Transcode succeeded. Output paths: " ++ show outputPaths
           updateJobToCompleted vid outputPaths
-          -- Validate with the domain model's FinishedJob constructor
           let validated = finishJob outputPaths (RunningJob vid workerId 0)
           liftIO $ putStrLn $ "[INFO] Validated FinishedJob: " ++ show validated
           publish $ TranscodeFinishedEvent vid outputPaths
+          return $ Right ()
         Left err -> do
-          liftIO $ putStrLn $ "[ERROR] Transcode failed: " <> T.unpack err
+          liftIO $ putStrLn $ "[ERROR] Transcode failed: " ++ T.unpack err
           updateJobToPending vid
-          publish $ TranscodeFailedEvent vid err
-    Just (MkAnyVideoJob _) ->
-      liftIO $ putStrLn "[WARN] Job is not in Pending state. Skipping."
-    Nothing ->
-      liftIO $ putStrLn "[WARN] No job found for this video ID. Skipping."
-handleEvent (TranscodeFinishedEvent _vid _chunks) =
+          return $ Left err
+    Just (MkAnyVideoJob _) -> do
+      liftIO $ putStrLn "[INFO] Job already in Processing/Completed state. Idempotent — acking."
+      return $ Right ()
+    Nothing -> do
+      liftIO $ putStrLn "[WARN] No job found for this video ID. Acking (skip)."
+      return $ Right ()
+handleEvent (TranscodeFinishedEvent _vid _chunks) = do
   liftIO $ putStrLn "[INFO] Received TranscodeFinishedEvent (not yet handled)."
-handleEvent (TranscodeFailedEvent _vid _err) =
+  return $ Right ()
+handleEvent (TranscodeFailedEvent _vid _err) = do
   liftIO $ putStrLn "[INFO] Received TranscodeFailedEvent (not yet handled)."
+  return $ Right ()
 
 -- | Map a resolution to an FFmpeg scale filter.
 resolutionToScale :: Resolution -> Text
@@ -191,9 +301,8 @@ transcodeVideo vid res sourceKey = do
       -- Output directory: "{uuid}/{resolution}/"
       outputDir = uuidText <> "/" <> tag
       scale = resolutionToScale res
-      inputBucket = minioBucket minioCfg          -- "raw-videos"
-      outputBucket = minioOutputBucket minioCfg    -- "processed-videos"
-
+      inputBucket = minioBucket minioCfg -- "raw-videos"
+      outputBucket = minioOutputBucket minioCfg -- "processed-videos"
   result <- liftIO $ try @SomeException $ do
     tmpDir <- createTempDirectory "/tmp" "tva-transcode"
 
@@ -210,20 +319,34 @@ transcodeVideo vid res sourceKey = do
     let segmentPattern = tmpDir </> "segment_%03d.ts"
         outputPlaylist = tmpDir </> "output.m3u8"
     runProcess_ $
-      proc "ffmpeg"
-        [ "-i", inputFile,
-          "-c:v", "libx264",
-          "-preset", "fast",
-          "-crf", "23",
-          "-force_key_frames", "expr:gte(t,n_forced*2)",
-          "-c:a", "aac",
-          "-b:a", "128k",
-          "-vf", T.unpack scale,
-          "-f", "hls",
-          "-hls_time", "6",
-          "-hls_list_size", "0",
-          "-hls_segment_type", "mpegts",
-          "-hls_segment_filename", segmentPattern,
+      proc
+        "ffmpeg"
+        [ "-i",
+          inputFile,
+          "-c:v",
+          "libx264",
+          "-preset",
+          "fast",
+          "-crf",
+          "23",
+          "-force_key_frames",
+          "expr:gte(t,n_forced*2)",
+          "-c:a",
+          "aac",
+          "-b:a",
+          "128k",
+          "-vf",
+          T.unpack scale,
+          "-f",
+          "hls",
+          "-hls_time",
+          "6",
+          "-hls_list_size",
+          "0",
+          "-hls_segment_type",
+          "mpegts",
+          "-hls_segment_filename",
+          segmentPattern,
           outputPlaylist
         ]
     putStrLn "[INFO] FFmpeg HLS transcode complete."
@@ -231,12 +354,14 @@ transcodeVideo vid res sourceKey = do
     -- Collect and upload all HLS output files to processed-videos bucket
     files <- listDirectory tmpDir
     let outputFiles = filter (\f -> takeExtension f `elem` [".m3u8", ".ts"]) files
-    mapM_ (\f -> do
-      let localPath = tmpDir </> f
-          objectKey = encodeUtf8 outputDir <> "/" <> encodeUtf8 (T.pack f)
-      uploadObject minioCfg outputBucket objectKey localPath
-      putStrLn $ "[INFO] Uploaded " <> f <> " to MinIO (" <> T.unpack outputDir <> ")"
-      ) outputFiles
+    mapM_
+      ( \f -> do
+          let localPath = tmpDir </> f
+              objectKey = encodeUtf8 outputDir <> "/" <> encodeUtf8 (T.pack f)
+          uploadObject minioCfg outputBucket objectKey localPath
+          putStrLn $ "[INFO] Uploaded " <> f <> " to MinIO (" <> T.unpack outputDir <> ")"
+      )
+      outputFiles
 
     -- Build the list of output paths for the 'FinishedJob' constructor
     let outputPaths = map (\f -> outputDir <> "/" <> T.pack f) outputFiles
