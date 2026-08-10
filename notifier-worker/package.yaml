@@ -13,6 +13,19 @@ language: GHC2021
 
 dependencies:
 - base >= 4.17 && < 5
+- aeson
+- async
+- bytestring
+- containers
+- hasql
+- postgresql-libpq
+- stm
+- text
+- uuid
+- wai
+- wai-websockets
+- warp
+- websockets
 - tva-core-domain
 
 executables:

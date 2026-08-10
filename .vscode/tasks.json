@@ -1,0 +1,40 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "build-video-worker",
+			"type": "shell",
+			"command": "stack build tva-video-worker",
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "build-video-worker-2",
+			"type": "shell",
+			"command": "stack build tva-video-worker",
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "build-video-worker-3",
+			"type": "shell",
+			"command": "stack build tva-video-worker",
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "build-vw",
+			"type": "shell",
+			"command": "stack build tva-video-worker",
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "build-vw-final",
+			"type": "shell",
+			"command": "stack build tva-video-worker 2>&1 | grep -E 'warning:|error:|Linking|Installing'",
+			"problemMatcher": [],
+			"group": "build"
+		}
+	]
+}

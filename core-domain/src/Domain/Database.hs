@@ -26,16 +26,21 @@ module Domain.Database
     updateJobToProcessing',
     updateJobToPending',
     updateJobToCompleted',
+
+    -- * Trigger initialization
+    initJobStatusTrigger,
   )
 where
 
+import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
 import Data.Int (Int32)
 import Data.Text (Text)
 import Data.UUID (UUID)
 import Domain.Core
 import GHC.Generics (Generic)
 import Hasql.Connection qualified as Hasql (Connection)
-import Hasql.Session qualified as Hasql (run, statement)
+import Hasql.Session qualified as Hasql (run, sql, statement)
 import Rel8
 
 instance DBType (EntityId a) where
@@ -220,4 +225,40 @@ updateJobToCompleted' conn vid chunks = do
               returning = NoReturning
             }
   _ <- Hasql.run (Hasql.statement () (run_ stmt)) conn
+  return ()
+
+-- | Initialize the PostgreSQL trigger that sends NOTIFY on job status changes.
+--   Idempotent — uses CREATE OR REPLACE, safe to call on every startup.
+initJobStatusTrigger :: Hasql.Connection -> IO ()
+initJobStatusTrigger conn = do
+  let createFunctionSql =
+        BS.concat
+          [ "CREATE OR REPLACE FUNCTION notify_job_status_change() ",
+            "RETURNS TRIGGER AS $$ ",
+            "BEGIN ",
+            "IF (TG_OP = 'INSERT') OR (OLD.status IS DISTINCT FROM NEW.status) THEN ",
+            "PERFORM pg_notify('job_status_changed', ",
+            "json_build_object(",
+            "'videoId', NEW.id::text, ",
+            "'oldStatus', CASE WHEN TG_OP = 'INSERT' THEN NULL ELSE OLD.status::text END, ",
+            "'newStatus', NEW.status::text, ",
+            "'outputChunks', COALESCE(to_json(NEW.output_chunks), '[]'::json), ",
+            "'progress', NEW.progress_percent ",
+            ")::text); ",
+            "END IF; ",
+            "RETURN NEW; ",
+            "END; ",
+            "$$ LANGUAGE plpgsql;"
+          ]
+      createTriggerSql =
+        "CREATE TRIGGER job_status_change_trigger "
+          <> "AFTER INSERT OR UPDATE OF status "
+          <> "ON video_jobs "
+          <> "FOR EACH ROW "
+          <> "EXECUTE FUNCTION notify_job_status_change();"
+          :: ByteString
+
+  _ <- Hasql.run (Hasql.sql createFunctionSql) conn
+  _ <- Hasql.run (Hasql.sql createTriggerSql) conn
+  putStrLn "[INFO] PostgreSQL trigger 'job_status_change_trigger' initialized."
   return ()

@@ -24,6 +24,19 @@ executable tva-notifier-worker
       ./
   ghc-options: -Wall
   build-depends:
-      base >=4.17 && <5
+      aeson
+    , async
+    , base >=4.17 && <5
+    , bytestring
+    , containers
+    , hasql
+    , postgresql-libpq
+    , stm
+    , text
     , tva-core-domain
+    , uuid
+    , wai
+    , wai-websockets
+    , warp
+    , websockets
   default-language: GHC2021
