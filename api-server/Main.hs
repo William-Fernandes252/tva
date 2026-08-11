@@ -1,6 +1,7 @@
 {-# LANGUAGE DisambiguateRecordFields #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE GADTs #-}
 
 module Main where
 
@@ -13,8 +14,9 @@ import Data.Text qualified as T
 import Data.Time (NominalDiffTime)
 import Data.UUID (UUID, fromText, toText)
 import Data.UUID.V4 (nextRandom)
-import Domain.Core (EntityId (..), JobState (..), Resolution, Video, resolutionFromTag, resolutionToTag)
-import Domain.Database (MonadDatabase (..))
+import Domain.Core (EntityId (..), JobState (..), Resolution, Video, resolutionFromTag, resolutionToTag, VideoJob(..))
+import Domain.Database (MonadDatabase (..), AnyVideoJob(..))
+import Control.Monad.Except (MonadError)
 import Domain.Event (SystemEvent (..))
 import Domain.Queue (MonadQueue (..))
 import Domain.Storage (MonadStorage (..))
@@ -23,7 +25,7 @@ import Servant
 
 -- | Polymorphic server implementation for the VideoAPI.
 --   Works in any monad that supports storage, queue, database, and IO operations.
-server :: (MonadStorage m, MonadQueue SystemEvent m, MonadDatabase m, MonadIO m) => ServerT VideoAPI m
+server :: (MonadStorage m, MonadQueue SystemEvent m, MonadDatabase m, MonadIO m, MonadError ServerError m) => ServerT VideoAPI m
 server = requestUpload :<|> checkStatus :<|> handleMinioWebhook
   where
     -- \| Handler for POST /videos
@@ -41,9 +43,15 @@ server = requestUpload :<|> checkStatus :<|> handleMinioWebhook
       return $ UploadResponse videoId url
 
     -- \| Handler for GET /videos/:id/status
-    checkStatus :: (MonadIO m) => UUID -> m StatusResponse
-    checkStatus _uuid = do
-      return $ StatusResponse Pending Nothing
+    checkStatus :: (MonadDatabase m, MonadIO m, MonadError ServerError m) => UUID -> m StatusResponse
+    checkStatus uuid = do
+      mJob <- findVideoJobById (EntityId uuid)
+      case mJob of
+        Just (MkAnyVideoJob job) -> case job of
+          QueuedJob _ _ -> return $ StatusResponse Pending Nothing
+          RunningJob _ _ prog -> return $ StatusResponse Processing (Just (fromIntegral prog))
+          FinishedJob _ _ -> return $ StatusResponse Completed Nothing
+        Nothing -> throwError err404 { errBody = "Video job not found" }
 
     -- \| Handler for POST /webhooks/minio
     handleMinioWebhook :: (MonadQueue SystemEvent m, MonadIO m) => MinioWebhookEvent -> m NoContent

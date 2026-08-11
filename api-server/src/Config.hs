@@ -9,7 +9,7 @@ import Adapters.PostgreSQL (initPostgreSQL)
 import Adapters.RabbitMQ (RabbitConfig, initRabbitMQ, publish)
 import Adapters.S3 (S3Config, generateUploadUrl, initMinioEnv)
 import Control.Exception (SomeException, try)
-import Control.Monad.Except (ExceptT (..))
+import Control.Monad.Except (ExceptT (..), MonadError, runExceptT)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (MonadReader, ReaderT, asks, runReaderT)
 import Data.String (fromString)
@@ -31,8 +31,8 @@ data AppConfig = AppConfig
   }
 
 -- | The concrete application monad stack, parameterized by 'AppConfig'.
-newtype AppM a = AppM {runAppM :: ReaderT AppConfig IO a}
-  deriving (Functor, Applicative, Monad, MonadIO, MonadReader AppConfig)
+newtype AppM a = AppM {runAppM :: ReaderT AppConfig (ExceptT ServerError IO) a}
+  deriving (Functor, Applicative, Monad, MonadIO, MonadReader AppConfig, MonadError ServerError)
 
 -- | MonadStorage instance: delegates to the S3 adapter using the config extractor.
 instance MonadStorage AppM where
@@ -94,9 +94,9 @@ initAppConfig = do
 --   Catches IO exceptions and wraps them as HTTP 500 errors.
 nt :: AppConfig -> AppM a -> Handler a
 nt cfg action = Handler $ ExceptT $ do
-  result <- try $ runReaderT (runAppM action) cfg
+  result <- try $ runExceptT $ runReaderT (runAppM action) cfg
   case result of
     Left (e :: SomeException) ->
       pure $ Left $ err500 {errBody = fromString $ "Internal server error: " ++ show e}
-    Right a ->
-      pure $ Right a
+    Right (Left e) -> pure $ Left e
+    Right (Right a) -> pure $ Right a
