@@ -48,9 +48,10 @@ server = requestUpload :<|> checkStatus :<|> handleMinioWebhook
       mJob <- findVideoJobById (EntityId uuid)
       case mJob of
         Just (MkAnyVideoJob job) -> case job of
-          QueuedJob _ _ -> return $ StatusResponse Pending Nothing
-          RunningJob _ _ prog -> return $ StatusResponse Processing (Just (fromIntegral prog))
-          FinishedJob _ _ -> return $ StatusResponse Completed Nothing
+          QueuedJob _ _ -> return $ StatusResponse Pending Nothing Nothing
+          RunningJob _ _ prog -> return $ StatusResponse Processing (Just (fromIntegral prog)) Nothing
+          FinishedJob _ _ -> return $ StatusResponse Completed Nothing Nothing
+          FailedJob _ err -> return $ StatusResponse Failed Nothing (Just err)
         Nothing -> throwError err404 { errBody = "Video job not found" }
 
     -- \| Handler for POST /webhooks/minio

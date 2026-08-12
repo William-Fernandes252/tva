@@ -26,6 +26,7 @@ module Domain.Database
     updateJobToProcessing',
     updateJobToPending',
     updateJobToCompleted',
+    updateJobToFailed',
 
     -- * Trigger initialization
     initJobStatusTrigger,
@@ -55,12 +56,14 @@ instance DBType JobState where
       fromText "PENDING" = Pending
       fromText "PROCESSING" = Processing
       fromText "COMPLETED" = Completed
+      fromText "FAILED" = Failed
       fromText _ = Pending
 
       toText :: JobState -> Text
       toText Pending = "PENDING"
       toText Processing = "PROCESSING"
       toText Completed = "COMPLETED"
+      toText Failed = "FAILED"
 
 -- | Represents a row in the video_jobs table, corresponding to a VideoJob in the domain model.
 data VideoJobRow f = VideoJobRow
@@ -69,7 +72,8 @@ data VideoJobRow f = VideoJobRow
     sourceUrl :: Column f Text,
     assignedTo :: Column f (Maybe (EntityId Worker)),
     progress :: Column f (Maybe Int32),
-    outputChunks :: Column f [Text]
+    outputChunks :: Column f [Text],
+    errorMessage :: Column f (Maybe Text)
   }
   deriving stock (Generic)
   deriving anyclass (Rel8able)
@@ -92,7 +96,8 @@ videoJobTable =
             sourceUrl = "source_url",
             assignedTo = "assigned_worker_id",
             progress = "progress_percent",
-            outputChunks = "output_chunks"
+            outputChunks = "output_chunks",
+            errorMessage = "error_message"
           }
     }
 
@@ -111,6 +116,10 @@ parseDbRow row = case jobStatus row of
       _ -> Left "Corrupted DB state: Processing job missing worker or progress"
   Completed ->
     Right $ MkAnyVideoJob (FinishedJob (jobId row) (outputChunks row))
+  Failed ->
+    case errorMessage row of
+      Just err -> Right $ MkAnyVideoJob (FailedJob (jobId row) err)
+      Nothing -> Right $ MkAnyVideoJob (FailedJob (jobId row) "Unknown error")
 
 -- | Monad to abstract database operations for the video-processing service.
 class (Monad m) => MonadDatabase m where
@@ -129,6 +138,9 @@ class (Monad m) => MonadDatabase m where
   -- | Mark a job as 'Completed', storing the HLS output chunk paths.
   updateJobToCompleted :: EntityId Video -> [Text] -> m ()
 
+  -- | Mark a job as 'Failed', storing the error message.
+  updateJobToFailed :: EntityId Video -> Text -> m ()
+
 -- | Insert a new video job with 'Pending' status.
 insertPendingJob' :: Hasql.Connection -> EntityId Video -> Text -> IO ()
 insertPendingJob' conn vid source = do
@@ -140,7 +152,8 @@ insertPendingJob' conn vid source = do
             sourceUrl = lit source,
             assignedTo = lit Nothing,
             progress = lit Nothing,
-            outputChunks = lit []
+            outputChunks = lit [],
+            errorMessage = lit Nothing
           }
       stmt =
         insert
@@ -180,7 +193,8 @@ updateJobToProcessing' conn vid worker = do
                 row
                   { jobStatus = lit Processing,
                     assignedTo = lit (Just worker),
-                    progress = lit (Just 0)
+                    progress = lit (Just 0),
+                    errorMessage = lit Nothing
                   },
               updateWhere = \_ row -> jobId row ==. lit vid,
               returning = NoReturning
@@ -200,7 +214,8 @@ updateJobToPending' conn vid = do
                 row
                   { jobStatus = lit Pending,
                     assignedTo = lit Nothing,
-                    progress = lit Nothing
+                    progress = lit Nothing,
+                    errorMessage = lit Nothing
                   },
               updateWhere = \_ row -> jobId row ==. lit vid,
               returning = NoReturning
@@ -219,7 +234,27 @@ updateJobToCompleted' conn vid chunks = do
               set = \_ row ->
                 row
                   { jobStatus = lit Completed,
-                    outputChunks = lit chunks
+                    outputChunks = lit chunks,
+                    errorMessage = lit Nothing
+                  },
+              updateWhere = \_ row -> jobId row ==. lit vid,
+              returning = NoReturning
+            }
+  _ <- Hasql.run (Hasql.statement () (run_ stmt)) conn
+  return ()
+
+-- | Mark a job as failed, storing the error message.
+updateJobToFailed' :: Hasql.Connection -> EntityId Video -> Text -> IO ()
+updateJobToFailed' conn vid err = do
+  let stmt =
+        update
+          Update
+            { target = videoJobTable,
+              from = pure (),
+              set = \_ row ->
+                row
+                  { jobStatus = lit Failed,
+                    errorMessage = lit (Just err)
                   },
               updateWhere = \_ row -> jobId row ==. lit vid,
               returning = NoReturning
@@ -243,7 +278,8 @@ initJobStatusTrigger conn = do
             "'oldStatus', CASE WHEN TG_OP = 'INSERT' THEN NULL ELSE OLD.status::text END, ",
             "'newStatus', NEW.status::text, ",
             "'outputChunks', COALESCE(to_json(NEW.output_chunks), '[]'::json), ",
-            "'progress', NEW.progress_percent ",
+            "'progress', NEW.progress_percent, ",
+            "'errorMessage', NEW.error_message ",
             ")::text); ",
             "END IF; ",
             "RETURN NEW; ",
@@ -255,8 +291,8 @@ initJobStatusTrigger conn = do
           <> "AFTER INSERT OR UPDATE OF status "
           <> "ON video_jobs "
           <> "FOR EACH ROW "
-          <> "EXECUTE FUNCTION notify_job_status_change();"
-          :: ByteString
+          <> "EXECUTE FUNCTION notify_job_status_change();" ::
+          ByteString
 
   _ <- Hasql.run (Hasql.sql createFunctionSql) conn
   _ <- Hasql.run (Hasql.sql createTriggerSql) conn

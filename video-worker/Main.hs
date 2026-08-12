@@ -30,6 +30,7 @@ import Domain.Database
     findVideoJobById',
     insertPendingJob',
     updateJobToCompleted',
+    updateJobToFailed',
     updateJobToPending',
     updateJobToProcessing',
   )
@@ -190,6 +191,9 @@ setupConsumer cfg handler = do
               else do
                 putStrLn "[ERROR] Max retries exhausted. Routing to DLQ."
                 sendToDLQ chan msg
+                case event of
+                  VideoUploadedEvent vid _ -> runReaderT (runWorkerM (updateJobToFailed vid "Max retries exhausted")) cfg
+                  _ -> return ()
                 ackEnv env
   return ()
 
@@ -237,6 +241,10 @@ instance MonadDatabase WorkerM where
   updateJobToCompleted vid chunks = do
     conn <- asks wDbConn
     liftIO $ Domain.Database.updateJobToCompleted' conn vid chunks
+
+  updateJobToFailed vid err = do
+    conn <- asks wDbConn
+    liftIO $ Domain.Database.updateJobToFailed' conn vid err
 
 -- | Handle an incoming system event.
 --   Returns 'Right ()' on success (message should be acked).

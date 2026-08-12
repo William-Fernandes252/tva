@@ -34,7 +34,8 @@ data JobStatusNotification = JobStatusNotification
     oldStatus :: Maybe Text,
     newStatus :: Text,
     outputChunks :: [Text],
-    progress :: Maybe Int32
+    progress :: Maybe Int32,
+    errorMessage :: Maybe Text
   }
   deriving (Show, Generic, FromJSON)
 

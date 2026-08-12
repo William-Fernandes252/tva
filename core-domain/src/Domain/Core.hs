@@ -29,7 +29,7 @@ data Worker
 data User
 
 -- | Represents the state of a video processing job.
-data JobState = Pending | Processing | Completed
+data JobState = Pending | Processing | Completed | Failed
   deriving (Show, Generic, FromJSON, ToJSON)
 
 -- | A GADT representing a video processing job, parameterized by its state.
@@ -40,6 +40,8 @@ data VideoJob (s :: JobState) where
   RunningJob :: EntityId Video -> EntityId Worker -> Int32 -> VideoJob 'Processing
   -- A finished job MUST have the output paths (e.g., HLS chunks).
   FinishedJob :: EntityId Video -> [Text] -> VideoJob 'Completed
+  -- A failed job MUST have an error message.
+  FailedJob :: EntityId Video -> Text -> VideoJob 'Failed
 
 deriving instance Show (VideoJob s)
 

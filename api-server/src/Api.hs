@@ -11,7 +11,7 @@ module Api where
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Text (Text)
 import Data.UUID (UUID)
-import Domain.Core (EntityId (..), JobState (..), Video, Resolution)
+import Domain.Core (EntityId (..), JobState (..), Resolution, Video)
 import GHC.Generics (Generic)
 import Servant
 
@@ -38,7 +38,8 @@ instance ToJSON UploadResponse
 
 data StatusResponse = StatusResponse
   { status :: JobState,
-    progress :: Maybe Int
+    progress :: Maybe Int,
+    errorMessage :: Maybe Text
   }
   deriving (Show, Generic)
 
@@ -50,8 +51,8 @@ instance ToJSON StatusResponse
 --   Matches the AWS S3 Event Notification structure used by MinIO.
 data MinioWebhookEvent = MinioWebhookEvent
   { eventName :: Text,
-    key       :: Maybe Text,
-    records   :: [MinioRecord]
+    key :: Maybe Text,
+    records :: [MinioRecord]
   }
   deriving (Show, Generic)
 
@@ -60,7 +61,7 @@ instance FromJSON MinioWebhookEvent
 -- | A single event record within an S3 notification.
 data MinioRecord = MinioRecord
   { eventName :: Text,
-    s3        :: MinioS3Payload
+    s3 :: MinioS3Payload
   }
   deriving (Show, Generic)
 
@@ -83,9 +84,9 @@ instance FromJSON MinioBucket
 
 -- | S3 object information from a notification.
 data MinioObject = MinioObject
-  { key   :: Text,
-    size  :: Maybe Int,
-    eTag  :: Maybe Text
+  { key :: Text,
+    size :: Maybe Int,
+    eTag :: Maybe Text
   }
   deriving (Show, Generic)
 
