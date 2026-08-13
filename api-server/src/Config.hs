@@ -14,6 +14,9 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (MonadReader, ReaderT, asks, runReaderT)
 import Data.String (fromString)
 import Data.Text (Text)
+import Data.Text qualified as T
+import Data.Maybe (fromMaybe)
+import System.Environment (lookupEnv)
 import Data.Time (NominalDiffTime)
 import Domain.Core (EntityId, Resolution, Video, Worker)
 import Domain.Database (MonadDatabase (..), findVideoJobById', insertPendingJob', updateJobToCompleted', updateJobToFailed', updateJobToPending', updateJobToProcessing')
@@ -27,7 +30,8 @@ import Servant
 data AppConfig = AppConfig
   { appS3Config :: S3Config,
     appRabbitConfig :: RabbitConfig,
-    appDbConn :: Hasql.Connection
+    appDbConn :: Hasql.Connection,
+    appWebhookSecret :: Text
   }
 
 -- | The concrete application monad stack, parameterized by 'AppConfig'.
@@ -83,6 +87,8 @@ initAppConfig :: IO AppConfig
 initAppConfig = do
   dbConn <- initPostgreSQL
 
+  secretStr <- fromMaybe "secret123" <$> lookupEnv "WEBHOOK_SECRET"
+
   putStrLn "Initializing S3/MinIO connection..."
   s3cfg <- initMinioEnv
   putStrLn "Initializing RabbitMQ connection..."
@@ -91,7 +97,8 @@ initAppConfig = do
     AppConfig
       { appS3Config = s3cfg,
         appRabbitConfig = rabbitCfg,
-        appDbConn = dbConn
+        appDbConn = dbConn,
+        appWebhookSecret = T.pack secretStr
       }
 
 -- | Natural transformation from 'AppM' to 'Handler'.

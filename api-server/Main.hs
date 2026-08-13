@@ -25,8 +25,8 @@ import Servant
 
 -- | Polymorphic server implementation for the VideoAPI.
 --   Works in any monad that supports storage, queue, database, and IO operations.
-server :: (MonadStorage m, MonadQueue SystemEvent m, MonadDatabase m, MonadIO m, MonadError ServerError m) => ServerT VideoAPI m
-server = requestUpload :<|> checkStatus :<|> handleMinioWebhook
+server :: (MonadStorage m, MonadQueue SystemEvent m, MonadDatabase m, MonadIO m, MonadError ServerError m) => Text -> ServerT VideoAPI m
+server webhookSecret = requestUpload :<|> checkStatus :<|> handleMinioWebhook
   where
     -- \| Handler for POST /videos
     --   Generates a presigned upload URL and inserts a Pending job into the database.
@@ -55,17 +55,21 @@ server = requestUpload :<|> checkStatus :<|> handleMinioWebhook
         Nothing -> throwError err404 { errBody = "Video job not found" }
 
     -- \| Handler for POST /webhooks/minio
-    handleMinioWebhook :: (MonadQueue SystemEvent m, MonadIO m) => MinioWebhookEvent -> m NoContent
-    handleMinioWebhook event = do
-      -- Only process ObjectCreated:Put events. Ack everything else silently.
-      if not (isObjectCreated event)
-        then return NoContent
+    handleMinioWebhook :: (MonadQueue SystemEvent m, MonadIO m, MonadError ServerError m) => Maybe Text -> MinioWebhookEvent -> m NoContent
+    handleMinioWebhook mAuthHeader event = do
+      let expectedToken = "Bearer " <> webhookSecret
+      if mAuthHeader /= Just expectedToken
+        then throwError err401 { errBody = "Unauthorized webhook request" }
         else do
-          case extractKey event >>= parseObjectKey of
-            Nothing -> return NoContent
-            Just (videoId, resolution) -> do
-              publish $ VideoUploadedEvent videoId resolution
-              return NoContent
+          -- Only process ObjectCreated:Put events. Ack everything else silently.
+          if not (isObjectCreated event)
+            then return NoContent
+            else do
+              case extractKey event >>= parseObjectKey of
+                Nothing -> return NoContent
+                Just (videoId, resolution) -> do
+                  publish $ VideoUploadedEvent videoId resolution
+                  return NoContent
 
 -- | Check whether the webhook event is an s3:ObjectCreated:Put notification.
 isObjectCreated :: MinioWebhookEvent -> Bool
@@ -95,6 +99,7 @@ parseObjectKey objKey = do
 main :: IO ()
 main = do
   cfg <- initAppConfig
+  let secret = appWebhookSecret cfg
   putStrLn "Starting api-server on port 8080..."
-  let application = serve videoApi (hoistServer videoApi (nt cfg) server)
+  let application = serve videoApi (hoistServer videoApi (nt cfg) (server secret))
   run 8080 application

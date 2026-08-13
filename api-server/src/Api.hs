@@ -105,6 +105,7 @@ type VideoAPI =
     -- POST /webhooks/minio -> S3 ObjectCreated event
     :<|> "webhooks"
       :> "minio"
+      :> Header "Authorization" Text
       :> ReqBody '[JSON] MinioWebhookEvent
       :> Post '[JSON] NoContent
 
