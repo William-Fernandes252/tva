@@ -29,6 +29,7 @@ dependencies:
 - amqp
 - hasql
 - rel8
+- katip
 
 executables:
   tva-api-server:

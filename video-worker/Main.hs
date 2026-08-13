@@ -5,13 +5,14 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 module Main where
 
 import Control.Concurrent (threadDelay)
 import Control.Exception (SomeException, try)
 import Control.Monad.IO.Class (MonadIO, liftIO)
-import Control.Monad.Reader (MonadReader, ReaderT, ask, asks, runReaderT)
+import Control.Monad.Reader (MonadReader, ReaderT, ask, asks, local, runReaderT)
 import Data.Aeson qualified as Aeson
 import Data.ByteString.Char8 qualified as B8
 import Data.ByteString.Lazy qualified as BL
@@ -25,15 +26,7 @@ import Data.UUID (toText)
 import Data.UUID.V4 (nextRandom)
 import Domain.Core (EntityId (..), Resolution (..), Video, VideoJob (..), Worker, finishJob, resolutionToTag)
 import Domain.Database
-  ( AnyVideoJob (MkAnyVideoJob),
-    MonadDatabase (..),
-    findVideoJobById',
-    insertPendingJob',
-    updateJobToCompleted',
-    updateJobToFailed',
-    updateJobToPending',
-    updateJobToProcessing',
-  )
+import Domain.Logger
 import Domain.Event (SystemEvent (..))
 import Domain.Queue (MonadQueue (..))
 import Hasql.Connection qualified as Hasql (Connection, acquire, settings)
@@ -53,7 +46,10 @@ data WorkerConfig = WorkerConfig
     wRabbitChan :: Channel,
     wWorkerId :: EntityId Worker,
     wMinio :: MinioConfig,
-    wRetry :: RetryConfig
+    wRetry :: RetryConfig,
+    wLogEnv :: LogEnv,
+    wKatipContext :: LogContexts,
+    wKatipNamespace :: Namespace
   }
 
 -- | Retry and backoff settings, configurable via environment variables.
@@ -66,6 +62,16 @@ data RetryConfig = RetryConfig
 -- | The concrete monad stack for the video worker.
 newtype WorkerM a = WorkerM {runWorkerM :: ReaderT WorkerConfig IO a}
   deriving (Functor, Applicative, Monad, MonadIO, MonadReader WorkerConfig)
+
+instance Katip WorkerM where
+  getLogEnv = asks wLogEnv
+  localLogEnv f (WorkerM m) = WorkerM (local (\c -> c {wLogEnv = f (wLogEnv c)}) m)
+
+instance KatipContext WorkerM where
+  getKatipContext = asks wKatipContext
+  localKatipContext f (WorkerM m) = WorkerM (local (\c -> c {wKatipContext = f (wKatipContext c)}) m)
+  getKatipNamespace = asks wKatipNamespace
+  localKatipNamespace f (WorkerM m) = WorkerM (local (\c -> c {wKatipNamespace = f (wKatipNamespace c)}) m)
 
 retryHeaderName :: Text
 retryHeaderName = "x-retry-count"
@@ -99,9 +105,10 @@ dlqName :: Text
 dlqName = "video_dlq"
 
 -- | Declare the dead-letter exchange and queue, binding them together.
-setupDeadLetterInfrastructure :: Channel -> IO ()
-setupDeadLetterInfrastructure chan = do
-  declareExchange
+setupDeadLetterInfrastructure :: WorkerConfig -> IO ()
+setupDeadLetterInfrastructure cfg = runKatipContextT (wLogEnv cfg) (mempty :: LogContexts) "video-worker" $ do
+  let chan = wRabbitChan cfg
+  liftIO $ declareExchange
     chan
     newExchange
       { exchangeName = dlxName,
@@ -109,7 +116,7 @@ setupDeadLetterInfrastructure chan = do
         exchangeDurable = True
       }
 
-  _ <-
+  _ <- liftIO $ 
     declareQueue
       chan
       newQueue
@@ -119,30 +126,29 @@ setupDeadLetterInfrastructure chan = do
           queueAutoDelete = False
         }
 
-  bindQueue chan dlqName dlxName "#"
+  liftIO $ bindQueue chan dlqName dlxName "#"
 
-  putStrLn "Dead-letter infrastructure initialized."
-  putStrLn "  DLX: video_dlx"
-  putStrLn "  DLQ: video_dlq"
+  $(logTM) InfoS "Dead-letter infrastructure initialized. DLX: video_dlx, DLQ: video_dlq"
 
 -- | Route a message to the dead-letter queue (after max retries).
-sendToDLQ :: Channel -> Message -> IO ()
-sendToDLQ chan msg = do
-  _ <- publishMsg chan dlxName "#" msg
-  putStrLn "[WARN] Message sent to dead-letter queue (max retries exhausted)."
+sendToDLQ :: WorkerConfig -> Message -> IO ()
+sendToDLQ cfg msg = runKatipContextT (wLogEnv cfg) (mempty :: LogContexts) "video-worker" $ do
+  let chan = wRabbitChan cfg
+  _ <- liftIO $ publishMsg chan dlxName "#" msg
+  $(logTM) WarningS "Message sent to dead-letter queue (max retries exhausted)."
 
 -- | Action to set up the queue and start consuming. Uses manual ack/nack
 --   with exponential backoff and a dead-letter queue for poison messages.
 setupConsumer :: WorkerConfig -> (SystemEvent -> WorkerM (Either Text ())) -> IO ()
-setupConsumer cfg handler = do
+setupConsumer cfg handler = runKatipContextT (wLogEnv cfg) (mempty :: LogContexts) "video-worker" $ do
   let chan = wRabbitChan cfg
       retryCfg = wRetry cfg
       maxRetries = retryMaxAttempts retryCfg
 
-  setupDeadLetterInfrastructure chan
+  liftIO $ setupDeadLetterInfrastructure cfg
 
   -- Declare main queue
-  _ <-
+  _ <- liftIO $ 
     declareQueue
       chan
       newQueue
@@ -152,49 +158,46 @@ setupConsumer cfg handler = do
           queueAutoDelete = False
         }
 
-  bindQueue chan "video_upload_queue" "video_exchange" "video.uploaded"
+  liftIO $ bindQueue chan "video_upload_queue" "video_exchange" "video.uploaded"
 
-  putStrLn "Video worker: waiting for VideoUploadedEvent messages..."
-  putStrLn "  queue: video_upload_queue"
-  putStrLn "  exchange: video_exchange"
-  putStrLn "  routing key: video.uploaded"
+  $(logTM) InfoS "Video worker: waiting for VideoUploadedEvent messages on video_upload_queue"
 
   -- Manual ack mode: we decide when to ack/nack each message
-  _consumerTag <- consumeMsgs chan "video_upload_queue" Ack $ \(msg, env) -> do
+  _consumerTag <- liftIO $ consumeMsgs chan "video_upload_queue" Ack $ \(msg, env) -> runKatipContextT (wLogEnv cfg) (mempty :: LogContexts) "video-worker" $ do
     case Aeson.decode (msgBody msg) of
       Nothing -> do
-        putStrLn "[WARN] Could not decode message body. Sending to DLQ."
-        sendToDLQ chan msg
-        ackEnv env
+        $(logTM) WarningS "Could not decode message body. Sending to DLQ."
+        liftIO $ sendToDLQ cfg msg
+        liftIO $ ackEnv env
       Just event -> do
         let retryCount = getRetryCount msg
-        result <- runReaderT (runWorkerM (handler event)) cfg
+        result <- liftIO $ runReaderT (runWorkerM (handler event)) cfg
         case result of
           Right () -> do
-            putStrLn "[INFO] Message processed successfully. Acking."
-            ackEnv env
-          Left errMsg -> do
-            putStrLn $ "[WARN] Processing failed (retry " <> show retryCount <> "/" <> show maxRetries <> "): " <> T.unpack errMsg
+            $(logTM) InfoS "Message processed successfully. Acking."
+            liftIO $ ackEnv env
+          Left errMsg -> katipAddContext (sl "retryCount" retryCount <> sl "maxRetries" maxRetries <> sl "error" errMsg) $ do
+            $(logTM) WarningS "Processing failed"
             if retryCount < maxRetries
               then do
                 let delay = backoffDelay retryCfg retryCount
                     delaySecs = delay `div` 1_000_000
-                putStrLn $ "[INFO] Retrying in " <> show delaySecs <> "s (exponential backoff)..."
-                threadDelay delay
+                $(logTM) InfoS "Retrying (exponential backoff)"
+                liftIO $ threadDelay delay
                 -- Publish retry message with incremented count
                 let retryMsg =
                       (setRetryHeader (retryCount + 1) msg)
                         { msgDeliveryMode = Just Persistent
                         }
-                _ <- publishMsg chan "video_exchange" "video.uploaded" retryMsg
-                ackEnv env
+                _ <- liftIO $ publishMsg chan "video_exchange" "video.uploaded" retryMsg
+                liftIO $ ackEnv env
               else do
-                putStrLn "[ERROR] Max retries exhausted. Routing to DLQ."
-                sendToDLQ chan msg
+                $(logTM) ErrorS "Max retries exhausted. Routing to DLQ."
+                liftIO $ sendToDLQ cfg msg
                 case event of
-                  VideoUploadedEvent vid _ -> runReaderT (runWorkerM (updateJobToFailed vid "Max retries exhausted")) cfg
+                  VideoUploadedEvent vid _ -> liftIO $ runReaderT (runWorkerM (updateJobToFailed vid "Max retries exhausted")) cfg
                   _ -> return ()
-                ackEnv env
+                liftIO $ ackEnv env
   return ()
 
 instance MonadQueue SystemEvent WorkerM where
@@ -250,46 +253,40 @@ instance MonadDatabase WorkerM where
 --   Returns 'Right ()' on success (message should be acked).
 --   Returns 'Left errorMsg' on transient failure (consumer will retry/DLQ).
 handleEvent :: SystemEvent -> WorkerM (Either Text ())
-handleEvent (VideoUploadedEvent vid res) = do
+handleEvent (VideoUploadedEvent vid res) = katipAddContext (sl "videoId" (show vid) <> sl "resolution" (resolutionToTag res)) $ do
   workerId <- asks wWorkerId
-  liftIO $
-    putStrLn $
-      "[INFO] Received VideoUploadedEvent { videoId: "
-        <> T.unpack (toText' vid)
-        <> ", resolution: "
-        <> T.unpack (resolutionToTag res)
-        <> " }"
+  $(logTM) InfoS "Received VideoUploadedEvent"
 
   mJob <- findVideoJobById vid
   case mJob of
     Just (MkAnyVideoJob (QueuedJob _ sourceKey)) -> do
-      liftIO $ putStrLn "[INFO] Found Pending job. Transitioning to Processing..."
+      $(logTM) InfoS "Found Pending job. Transitioning to Processing..."
       updateJobToProcessing vid workerId
-      liftIO $ putStrLn "[INFO] Starting transcode..."
+      $(logTM) InfoS "Starting transcode..."
       result <- transcodeVideo vid res sourceKey
       case result of
-        Right outputPaths -> do
-          liftIO $ putStrLn $ "[INFO] Transcode succeeded. Output paths: " ++ show outputPaths
+        Right outputPaths -> katipAddContext (sl "outputPaths" outputPaths) $ do
+          $(logTM) InfoS "Transcode succeeded"
           updateJobToCompleted vid outputPaths
           let validated = finishJob outputPaths (RunningJob vid workerId 0)
-          liftIO $ putStrLn $ "[INFO] Validated FinishedJob: " ++ show validated
+          katipAddContext (sl "validatedJob" (show validated)) $ $(logTM) InfoS "Validated FinishedJob"
           publish $ TranscodeFinishedEvent vid outputPaths
           return $ Right ()
-        Left err -> do
-          liftIO $ putStrLn $ "[ERROR] Transcode failed: " ++ T.unpack err
+        Left err -> katipAddContext (sl "error" err) $ do
+          $(logTM) ErrorS "Transcode failed"
           updateJobToPending vid
           return $ Left err
     Just (MkAnyVideoJob _) -> do
-      liftIO $ putStrLn "[INFO] Job already in Processing/Completed state. Idempotent — acking."
+      $(logTM) InfoS "Job already in Processing/Completed state. Idempotent — acking."
       return $ Right ()
     Nothing -> do
-      liftIO $ putStrLn "[WARN] No job found for this video ID. Acking (skip)."
+      $(logTM) WarningS "No job found for this video ID. Acking (skip)."
       return $ Right ()
 handleEvent (TranscodeFinishedEvent _vid _chunks) = do
-  liftIO $ putStrLn "[INFO] Received TranscodeFinishedEvent (not yet handled)."
+  $(logTM) InfoS "Received TranscodeFinishedEvent (not yet handled)."
   return $ Right ()
 handleEvent (TranscodeFailedEvent _vid _err) = do
-  liftIO $ putStrLn "[INFO] Received TranscodeFailedEvent (not yet handled)."
+  $(logTM) InfoS "Received TranscodeFailedEvent (not yet handled)."
   return $ Right ()
 
 -- | Map a resolution to an FFmpeg scale filter.
@@ -321,7 +318,6 @@ transcodeVideo vid res sourceKey = do
     let inputFile = tmpDir </> "input.mkv"
     videoBytes <- downloadObject minioCfg inputBucket (encodeUtf8 sourceKey)
     BL.writeFile inputFile videoBytes
-    putStrLn $ "[INFO] Downloaded source video to " <> inputFile
 
     -- FFmpeg: transcode to HLS with proper chunking
     --   -force_key_frames ensures clean segment boundaries every 2 seconds
@@ -360,7 +356,6 @@ transcodeVideo vid res sourceKey = do
           segmentPattern,
           outputPlaylist
         ]
-    putStrLn "[INFO] FFmpeg HLS transcode complete."
 
     -- Collect and upload all HLS output files to processed-videos bucket
     files <- listDirectory tmpDir
@@ -370,7 +365,6 @@ transcodeVideo vid res sourceKey = do
           let localPath = tmpDir </> f
               objectKey = encodeUtf8 outputDir <> "/" <> encodeUtf8 (T.pack f)
           uploadObject minioCfg outputBucket objectKey localPath
-          putStrLn $ "[INFO] Uploaded " <> f <> " to MinIO (" <> T.unpack outputDir <> ")"
       )
       outputFiles
 
@@ -392,86 +386,85 @@ toText' (EntityId u) = toText u
 
 main :: IO ()
 main = do
-  putStrLn "=== TVA Video Worker ==="
+  logEnv <- setupLogEnv "video-worker" "development"
+  runKatipContextT logEnv (mempty :: LogContexts) "startup" $ do
+    $(logTM) InfoS "=== TVA Video Worker ==="
 
-  -- Initialize PostgreSQL connection pool.
-  pgHost <- fromMaybe "127.0.0.1" <$> lookupEnv "PG_HOST"
-  mPgPort <- lookupEnv "PG_PORT"
-  let pgPort = fromMaybe 5432 (mPgPort >>= readMaybe)
-  pgUser <- fromMaybe "video_user" <$> lookupEnv "PG_USER"
-  pgPass <- fromMaybe "video_password" <$> lookupEnv "PG_PASS"
-  pgDb <- fromMaybe "video_db" <$> lookupEnv "PG_DB"
-  let connSettings =
-        Hasql.settings
-          (fromString pgHost)
-          (fromIntegral pgPort)
-          (fromString pgUser)
-          (fromString pgPass)
-          (fromString pgDb)
-  result <- Hasql.acquire connSettings
-  dbConn <- case result of
-    Left err -> error $ "Failed to connect to PostgreSQL: " ++ show err
-    Right c -> return c
-  putStrLn $ "Connected to PostgreSQL at " ++ pgHost ++ ":" ++ show (pgPort :: Int)
+    -- Initialize PostgreSQL connection pool.
+    pgHost <- liftIO $ fromMaybe "127.0.0.1" <$> lookupEnv "PG_HOST"
+    mPgPort <- liftIO $ lookupEnv "PG_PORT"
+    let pgPort = fromMaybe 5432 (mPgPort >>= readMaybe)
+    pgUser <- liftIO $ fromMaybe "video_user" <$> lookupEnv "PG_USER"
+    pgPass <- liftIO $ fromMaybe "video_password" <$> lookupEnv "PG_PASS"
+    pgDb <- liftIO $ fromMaybe "video_db" <$> lookupEnv "PG_DB"
+    let connSettings =
+          Hasql.settings
+            (fromString pgHost)
+            (fromIntegral pgPort)
+            (fromString pgUser)
+            (fromString pgPass)
+            (fromString pgDb)
+    result <- liftIO $ Hasql.acquire connSettings
+    dbConn <- case result of
+      Left err -> error $ "Failed to connect to PostgreSQL: " ++ show err
+      Right c -> return c
+    $(logTM) InfoS "Connected to PostgreSQL"
 
-  -- Initialize RabbitMQ connection.
-  mqHost <- fromMaybe "127.0.0.1" <$> lookupEnv "RABBITMQ_HOST"
-  mqUser <- fromMaybe "mq_user" <$> lookupEnv "RABBITMQ_USER"
-  mqPass <- fromMaybe "mq_password" <$> lookupEnv "RABBITMQ_PASS"
-  mqVhost <- fromMaybe "/" <$> lookupEnv "RABBITMQ_VHOST"
-  conn <- openConnection mqHost (T.pack mqVhost) (T.pack mqUser) (T.pack mqPass)
-  chan <- openChannel conn
+    -- Initialize RabbitMQ connection.
+    mqHost <- liftIO $ fromMaybe "127.0.0.1" <$> lookupEnv "RABBITMQ_HOST"
+    mqUser <- liftIO $ fromMaybe "mq_user" <$> lookupEnv "RABBITMQ_USER"
+    mqPass <- liftIO $ fromMaybe "mq_password" <$> lookupEnv "RABBITMQ_PASS"
+    mqVhost <- liftIO $ fromMaybe "/" <$> lookupEnv "RABBITMQ_VHOST"
+    conn <- liftIO $ openConnection mqHost (T.pack mqVhost) (T.pack mqUser) (T.pack mqPass)
+    chan <- liftIO $ openChannel conn
 
-  -- Declare the topic exchange (idempotent — fine if api-server already did it).
-  declareExchange
-    chan
-    newExchange
-      { exchangeName = "video_exchange",
-        exchangeType = "topic",
-        exchangeDurable = True
-      }
-  putStrLn $ "Connected to RabbitMQ at " ++ mqHost
+    -- Declare the topic exchange (idempotent — fine if api-server already did it).
+    liftIO $ declareExchange
+      chan
+      newExchange
+        { exchangeName = "video_exchange",
+          exchangeType = "topic",
+          exchangeDurable = True
+        }
+    $(logTM) InfoS "Connected to RabbitMQ"
 
-  -- Generate a random worker ID.
-  workerUuid <- nextRandom
-  let workerId = EntityId workerUuid :: EntityId Worker
-  putStrLn $ "Worker ID: " <> show workerUuid
+    -- Generate a random worker ID.
+    workerUuid <- liftIO nextRandom
+    let workerId = EntityId workerUuid :: EntityId Worker
+    katipAddContext (sl "workerId" (show workerUuid)) $ $(logTM) InfoS "Worker ID generated"
 
-  -- Initialize MinIO connection.
-  putStrLn "Initializing MinIO connection..."
-  minioCfg <- initMinIO
-  putStrLn "MinIO connection initialized."
+    -- Initialize MinIO connection.
+    $(logTM) InfoS "Initializing MinIO connection..."
+    minioCfg <- liftIO initMinIO
+    $(logTM) InfoS "MinIO connection initialized."
 
-  -- Initialize retry / backoff configuration from environment.
-  mMaxAttempts <- lookupEnv "RETRY_MAX_ATTEMPTS"
-  let retryMaxAttempts = fromMaybe 3 (mMaxAttempts >>= readMaybe)
-  mBaseDelay <- lookupEnv "RETRY_BASE_DELAY_SECONDS"
-  let retryBaseDelaySeconds = fromMaybe 5 (mBaseDelay >>= readMaybe)
-  mMaxDelay <- lookupEnv "RETRY_MAX_DELAY_SECONDS"
-  let retryMaxDelaySeconds = fromMaybe 60 (mMaxDelay >>= readMaybe)
-  let retryCfg = RetryConfig {retryMaxAttempts, retryBaseDelaySeconds, retryMaxDelaySeconds}
-  putStrLn $
-    "Retry config: maxAttempts="
-      <> show retryMaxAttempts
-      <> " baseDelay="
-      <> show retryBaseDelaySeconds
-      <> "s"
-      <> " maxDelay="
-      <> show retryMaxDelaySeconds
-      <> "s"
+    -- Initialize retry / backoff configuration from environment.
+    mMaxAttempts <- liftIO $ lookupEnv "RETRY_MAX_ATTEMPTS"
+    let retryMaxAttempts = fromMaybe 3 (mMaxAttempts >>= readMaybe)
+    mBaseDelay <- liftIO $ lookupEnv "RETRY_BASE_DELAY_SECONDS"
+    let retryBaseDelaySeconds = fromMaybe 5 (mBaseDelay >>= readMaybe)
+    mMaxDelay <- liftIO $ lookupEnv "RETRY_MAX_DELAY_SECONDS"
+    let retryMaxDelaySeconds = fromMaybe 60 (mMaxDelay >>= readMaybe)
+    let retryCfg = RetryConfig {retryMaxAttempts, retryBaseDelaySeconds, retryMaxDelaySeconds}
+    
+    katipAddContext (sl "maxAttempts" retryMaxAttempts <> sl "baseDelay" retryBaseDelaySeconds <> sl "maxDelay" retryMaxDelaySeconds) $
+      $(logTM) InfoS "Retry config loaded"
 
-  let cfg =
-        WorkerConfig
-          { wDbConn = dbConn,
-            wRabbitConn = conn,
-            wRabbitChan = chan,
-            wWorkerId = workerId,
-            wMinio = minioCfg,
-            wRetry = retryCfg
-          }
+    let cfg =
+          WorkerConfig
+            { wDbConn = dbConn,
+              wRabbitConn = conn,
+              wRabbitChan = chan,
+              wWorkerId = workerId,
+              wMinio = minioCfg,
+              wRetry = retryCfg,
+              wLogEnv = logEnv,
+              wKatipContext = mempty :: LogContexts,
+              wKatipNamespace = "video-worker"
+            }
 
-  -- Run the consumer loop (blocks until interrupted).
-  setupConsumer cfg handleEvent
+    -- Run the consumer loop (blocks until interrupted).
+    liftIO $ setupConsumer cfg handleEvent
 
 -- | Parse an integer from a string, returning Nothing on failure.
 readMaybe :: (Read a) => String -> Maybe a

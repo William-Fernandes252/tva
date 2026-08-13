@@ -2,6 +2,7 @@
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 module Main where
 
@@ -23,6 +24,7 @@ import Control.Monad.Except (MonadError)
 import Domain.Event (SystemEvent (..))
 import Domain.Queue (MonadQueue (..))
 import Domain.Storage (MonadStorage (..))
+import Domain.Logger
 import Network.Wai.Handler.Warp (run)
 import Servant
 
@@ -102,15 +104,17 @@ parseObjectKey objKey = do
 sweeperThread :: AppConfig -> IO ()
 sweeperThread cfg = forever $ do
   threadDelay (5 * 60 * 1000000) -- 5 minutes
-  putStrLn "[INFO] Sweeping for zombie jobs..."
-  rows <- resetZombieJobs' (appDbConn cfg)
-  forM_ rows $ \(vid, sourceUrl) -> do
-    putStrLn $ "[INFO] Reset zombie job: " <> show vid
-    case parseObjectKey sourceUrl of
-      Just (vId, res) -> do
-        _ <- runExceptT $ runReaderT (runAppM (publish (VideoUploadedEvent vId res))) cfg
-        return ()
-      Nothing -> putStrLn $ "[WARN] Could not parse resolution for zombie job: " <> show vid
+  runKatipContextT (appLogEnv cfg) (mempty :: LogContexts) "api-server" $ do
+    $(logTM) InfoS "Sweeping for zombie jobs..."
+    rows <- liftIO $ resetZombieJobs' (appDbConn cfg)
+    forM_ rows $ \(vid, sourceUrl) -> do
+      katipAddContext (sl "videoId" (show vid)) $ do
+        $(logTM) InfoS "Reset zombie job"
+        case parseObjectKey sourceUrl of
+          Just (vId, res) -> do
+            _ <- liftIO $ runExceptT $ runReaderT (runAppM (publish (VideoUploadedEvent vId res))) cfg
+            return ()
+          Nothing -> $(logTM) WarningS "Could not parse resolution for zombie job"
 
 -- | Application Boot
 main :: IO ()
@@ -118,6 +122,7 @@ main = do
   cfg <- initAppConfig
   let secret = appWebhookSecret cfg
   _ <- forkIO (sweeperThread cfg)
-  putStrLn "Starting api-server on port 8080..."
+  runKatipContextT (appLogEnv cfg) (mempty :: LogContexts) "api-server" $ do
+    $(logTM) InfoS "Starting api-server on port 8080..."
   let application = serve videoApi (hoistServer videoApi (nt cfg) (server secret))
   run 8080 application

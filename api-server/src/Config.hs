@@ -2,6 +2,7 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 module Config where
 
@@ -11,7 +12,7 @@ import Adapters.S3 (S3Config, generateUploadUrl, initMinioEnv)
 import Control.Exception (SomeException, try)
 import Control.Monad.Except (ExceptT (..), MonadError, runExceptT)
 import Control.Monad.IO.Class (MonadIO, liftIO)
-import Control.Monad.Reader (MonadReader, ReaderT, asks, runReaderT)
+import Control.Monad.Reader (MonadReader, ReaderT, asks, local, runReaderT)
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -23,6 +24,7 @@ import Domain.Database (MonadDatabase (..), findVideoJobById', insertPendingJob'
 import Domain.Event (SystemEvent)
 import Domain.Queue (MonadQueue (..))
 import Domain.Storage (MonadStorage (..))
+import Domain.Logger
 import Hasql.Connection qualified as Hasql (Connection)
 import Servant
 
@@ -31,12 +33,25 @@ data AppConfig = AppConfig
   { appS3Config :: S3Config,
     appRabbitConfig :: RabbitConfig,
     appDbConn :: Hasql.Connection,
-    appWebhookSecret :: Text
+    appWebhookSecret :: Text,
+    appLogEnv :: LogEnv,
+    appKatipContext :: LogContexts,
+    appKatipNamespace :: Namespace
   }
 
 -- | The concrete application monad stack, parameterized by 'AppConfig'.
 newtype AppM a = AppM {runAppM :: ReaderT AppConfig (ExceptT ServerError IO) a}
   deriving (Functor, Applicative, Monad, MonadIO, MonadReader AppConfig, MonadError ServerError)
+
+instance Katip AppM where
+  getLogEnv = asks appLogEnv
+  localLogEnv f (AppM m) = AppM (local (\c -> c {appLogEnv = f (appLogEnv c)}) m)
+
+instance KatipContext AppM where
+  getKatipContext = asks appKatipContext
+  localKatipContext f (AppM m) = AppM (local (\c -> c {appKatipContext = f (appKatipContext c)}) m)
+  getKatipNamespace = asks appKatipNamespace
+  localKatipNamespace f (AppM m) = AppM (local (\c -> c {appKatipNamespace = f (appKatipNamespace c)}) m)
 
 -- | MonadStorage instance: delegates to the S3 adapter using the config extractor.
 instance MonadStorage AppM where
@@ -54,7 +69,7 @@ instance MonadQueue SystemEvent AppM where
 
   consume :: (SystemEvent -> AppM ()) -> AppM ()
   consume _handler =
-    liftIO $ putStrLn "Consume not implemented for api-server."
+    $(logTM) WarningS "Consume not implemented for api-server."
 
 -- | MonadDatabase instance: delegates to the standalone functions in Domain.Database.
 instance MonadDatabase AppM where
@@ -85,21 +100,26 @@ instance MonadDatabase AppM where
 -- | Initialize all infrastructure and return a unified 'AppConfig'.
 initAppConfig :: IO AppConfig
 initAppConfig = do
-  dbConn <- initPostgreSQL
+  logEnv <- setupLogEnv "api-server" "development"
+  runKatipContextT logEnv (mempty :: LogContexts) "startup" $ do
+    dbConn <- liftIO initPostgreSQL
 
-  secretStr <- fromMaybe "secret123" <$> lookupEnv "WEBHOOK_SECRET"
+    secretStr <- liftIO $ fromMaybe "secret123" <$> lookupEnv "WEBHOOK_SECRET"
 
-  putStrLn "Initializing S3/MinIO connection..."
-  s3cfg <- initMinioEnv
-  putStrLn "Initializing RabbitMQ connection..."
-  rabbitCfg <- initRabbitMQ
-  return $
-    AppConfig
-      { appS3Config = s3cfg,
-        appRabbitConfig = rabbitCfg,
-        appDbConn = dbConn,
-        appWebhookSecret = T.pack secretStr
-      }
+    $(logTM) InfoS "Initializing S3/MinIO connection..."
+    s3cfg <- liftIO initMinioEnv
+    $(logTM) InfoS "Initializing RabbitMQ connection..."
+    rabbitCfg <- liftIO initRabbitMQ
+    return $
+      AppConfig
+        { appS3Config = s3cfg,
+          appRabbitConfig = rabbitCfg,
+          appDbConn = dbConn,
+          appWebhookSecret = T.pack secretStr,
+          appLogEnv = logEnv,
+          appKatipContext = mempty :: LogContexts,
+          appKatipNamespace = "api-server"
+        }
 
 -- | Natural transformation from 'AppM' to 'Handler'.
 --   Catches IO exceptions and wraps them as HTTP 500 errors.

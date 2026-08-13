@@ -1,6 +1,7 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 module Main (main) where
 
@@ -9,6 +10,7 @@ import Control.Concurrent.Async (withAsync)
 import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, writeTVar)
 import Control.Exception (SomeException, finally, try)
 import Control.Monad (forever, unless, void)
+import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON, eitherDecodeStrict)
 import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as B8
@@ -23,6 +25,7 @@ import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8)
 import Database.PostgreSQL.LibPQ qualified as PQ
 import Domain.Database (initJobStatusTrigger)
+import Domain.Logger
 import GHC.Generics (Generic)
 import Hasql.Connection qualified as Hasql
 import Network.WebSockets qualified as WS
@@ -80,102 +83,105 @@ broadcast (SubscriptionHub tv) vid payload = do
 
 -- | Open a dedicated libpq connection, LISTEN for job status changes,
 --   and broadcast received notifications to the subscription hub.
-listenLoop :: SubscriptionHub -> PQ.Connection -> IO ()
-listenLoop hub pgConn = do
-  putStrLn "[INFO] Starting PostgreSQL LISTEN loop on channel 'job_status_changed'..."
-  _ <- PQ.exec pgConn "LISTEN job_status_changed"
+listenLoop :: LogEnv -> SubscriptionHub -> PQ.Connection -> IO ()
+listenLoop logEnv hub pgConn = runKatipContextT logEnv (mempty :: LogContexts) "notifier-worker" $ do
+  $(logTM) InfoS "Starting PostgreSQL LISTEN loop on channel 'job_status_changed'..."
+  _ <- liftIO $ PQ.exec pgConn "LISTEN job_status_changed"
   forever $ do
-    _ <- PQ.consumeInput pgConn
-    mNotif <- PQ.notifies pgConn
+    _ <- liftIO $ PQ.consumeInput pgConn
+    mNotif <- liftIO $ PQ.notifies pgConn
     case mNotif of
       Just notif -> do
         let rawPayload = PQ.notifyExtra notif
-        putStrLn $ "[INFO] Received notification: " <> T.unpack (decodeUtf8 rawPayload)
+            decoded = decodeUtf8 rawPayload
+        katipAddContext (sl "payload" decoded) $ $(logTM) InfoS "Received notification"
         case eitherDecodeStrict rawPayload of
           Right (n :: JobStatusNotification) ->
-            broadcast hub (videoId n) (BL.fromStrict rawPayload)
+            liftIO $ broadcast hub (videoId n) (BL.fromStrict rawPayload)
           Left err ->
-            putStrLn $ "[WARN] Failed to parse notification payload: " <> err
+            katipAddContext (sl "error" err) $ $(logTM) WarningS "Failed to parse notification payload"
       Nothing ->
-        threadDelay 100000
+        liftIO $ threadDelay 100000
 
 -- | WebSocket server application. Accepts connections on /ws/<videoId>
 --   and streams job status updates for that video.
-wsApp :: SubscriptionHub -> WS.ServerApp
-wsApp hub pendingConn = do
+wsApp :: LogEnv -> SubscriptionHub -> WS.ServerApp
+wsApp logEnv hub pendingConn = runKatipContextT logEnv (mempty :: LogContexts) "notifier-worker" $ do
   let path = decodeUtf8 (WS.requestPath (WS.pendingRequest pendingConn))
   case T.stripPrefix "/ws/" path of
     Just vid -> do
-      conn <- WS.acceptRequest pendingConn
-      putStrLn $ "[INFO] WebSocket client connected for: " <> T.unpack vid
-      connId <- subscribe hub vid conn
+      conn <- liftIO $ WS.acceptRequest pendingConn
+      katipAddContext (sl "videoId" vid) $ $(logTM) InfoS "WebSocket client connected"
+      connId <- liftIO $ subscribe hub vid conn
       -- Keep the connection alive with a ping thread; clean up on disconnect.
-      WS.withPingThread conn 30 (return ()) $
+      liftIO $ WS.withPingThread conn 30 (return ()) $
         forever (void (WS.receiveData conn :: IO ByteString))
-          `finally` do
-            unsubscribe hub vid connId
-            putStrLn $ "[INFO] WebSocket client disconnected for: " <> T.unpack vid
+          `finally` runKatipContextT logEnv (mempty :: LogContexts) "notifier-worker" (do
+            liftIO $ unsubscribe hub vid connId
+            katipAddContext (sl "videoId" vid) $ $(logTM) InfoS "WebSocket client disconnected")
     Nothing ->
-      WS.rejectRequest pendingConn "Expected path /ws/<videoId>"
+      liftIO $ WS.rejectRequest pendingConn "Expected path /ws/<videoId>"
 
 main :: IO ()
 main = do
-  putStrLn "=== TVA Notifier Worker ==="
+  logEnv <- setupLogEnv "notifier-worker" "development"
+  runKatipContextT logEnv (mempty :: LogContexts) "startup" $ do
+    $(logTM) InfoS "=== TVA Notifier Worker ==="
 
-  -- Read PostgreSQL connection parameters from environment.
-  pgHost <- fromMaybe "127.0.0.1" <$> lookupEnv "PG_HOST"
-  mPgPort <- lookupEnv "PG_PORT"
-  let pgPort = fromMaybe 5432 (mPgPort >>= readMaybe)
-  pgUser <- fromMaybe "video_user" <$> lookupEnv "PG_USER"
-  pgPass <- fromMaybe "video_password" <$> lookupEnv "PG_PASS"
-  pgDb <- fromMaybe "video_db" <$> lookupEnv "PG_DB"
+    -- Read PostgreSQL connection parameters from environment.
+    pgHost <- liftIO $ fromMaybe "127.0.0.1" <$> lookupEnv "PG_HOST"
+    mPgPort <- liftIO $ lookupEnv "PG_PORT"
+    let pgPort = fromMaybe 5432 (mPgPort >>= readMaybe)
+    pgUser <- liftIO $ fromMaybe "video_user" <$> lookupEnv "PG_USER"
+    pgPass <- liftIO $ fromMaybe "video_password" <$> lookupEnv "PG_PASS"
+    pgDb <- liftIO $ fromMaybe "video_db" <$> lookupEnv "PG_DB"
 
-  let connSettings =
-        Hasql.settings
-          (fromString pgHost)
-          (fromIntegral pgPort)
-          (fromString pgUser)
-          (fromString pgPass)
-          (fromString pgDb)
-  hasqlResult <- Hasql.acquire connSettings
-  hasqlConn <- case hasqlResult of
-    Left err -> error $ "Failed to connect to PostgreSQL (Hasql): " <> show err
-    Right c -> return c
-  putStrLn $ "Connected to PostgreSQL (Hasql) at " <> pgHost <> ":" <> show (pgPort :: Int)
+    let connSettings =
+          Hasql.settings
+            (fromString pgHost)
+            (fromIntegral pgPort)
+            (fromString pgUser)
+            (fromString pgPass)
+            (fromString pgDb)
+    hasqlResult <- liftIO $ Hasql.acquire connSettings
+    hasqlConn <- case hasqlResult of
+      Left err -> error $ "Failed to connect to PostgreSQL (Hasql): " <> show err
+      Right c -> return c
+    $(logTM) InfoS "Connected to PostgreSQL (Hasql)"
 
-  -- Initialize the DB trigger (idempotent).
-  initJobStatusTrigger hasqlConn
+    -- Initialize the DB trigger (idempotent).
+    liftIO $ initJobStatusTrigger hasqlConn
 
-  let pgConnStr =
-        "host="
-          <> pgHost
-          <> " port="
-          <> show (pgPort :: Int)
-          <> " dbname="
-          <> pgDb
-          <> " user="
-          <> pgUser
-          <> " password="
-          <> pgPass
-  pgConn <- PQ.connectdb (B8.pack pgConnStr)
-  status <- PQ.status pgConn
-  unless (status == PQ.ConnectionOk) $ do
-    errMsg <- PQ.errorMessage pgConn
-    PQ.finish pgConn
-    error $ "Failed to connect to PostgreSQL (libpq): " <> show errMsg
-  putStrLn "Connected to PostgreSQL (libpq)."
+    let pgConnStr =
+          "host="
+            <> pgHost
+            <> " port="
+            <> show (pgPort :: Int)
+            <> " dbname="
+            <> pgDb
+            <> " user="
+            <> pgUser
+            <> " password="
+            <> pgPass
+    pgConn <- liftIO $ PQ.connectdb (B8.pack pgConnStr)
+    status <- liftIO $ PQ.status pgConn
+    unless (status == PQ.ConnectionOk) $ do
+      errMsg <- liftIO $ PQ.errorMessage pgConn
+      liftIO $ PQ.finish pgConn
+      error $ "Failed to connect to PostgreSQL (libpq): " <> show errMsg
+    $(logTM) InfoS "Connected to PostgreSQL (libpq)."
 
-  -- Read WebSocket server port.
-  mWsPort <- lookupEnv "NOTIFIER_PORT"
-  let wsPort = fromMaybe 8081 (mWsPort >>= readMaybe)
+    -- Read WebSocket server port.
+    mWsPort <- liftIO $ lookupEnv "NOTIFIER_PORT"
+    let wsPort = fromMaybe 8081 (mWsPort >>= readMaybe)
 
-  -- Create the subscription hub.
-  hub <- newSubscriptionHub
+    -- Create the subscription hub.
+    hub <- liftIO newSubscriptionHub
 
-  -- Run the LISTEN loop in a background thread; block on the WS server.
-  withAsync (listenLoop hub pgConn) $ \_listenAsync -> do
-    putStrLn $ "Starting WebSocket server on port " <> show wsPort <> "..."
-    WS.runServer "0.0.0.0" wsPort (wsApp hub)
+    -- Run the LISTEN loop in a background thread; block on the WS server.
+    liftIO $ withAsync (listenLoop logEnv hub pgConn) $ \_listenAsync -> runKatipContextT logEnv (mempty :: LogContexts) "notifier-worker" $ do
+      katipAddContext (sl "port" wsPort) $ $(logTM) InfoS "Starting WebSocket server"
+      liftIO $ WS.runServer "0.0.0.0" wsPort (wsApp logEnv hub)
 
 -- | Parse an integer from a string, returning 'Nothing' on failure.
 readMaybe :: (Read a) => String -> Maybe a

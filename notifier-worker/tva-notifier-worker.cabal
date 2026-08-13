@@ -30,6 +30,7 @@ executable tva-notifier-worker
     , bytestring
     , containers
     , hasql
+    , katip
     , postgresql-libpq
     , stm
     , text

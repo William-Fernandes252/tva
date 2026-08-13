@@ -18,6 +18,7 @@ dependencies:
 - bytestring
 - containers
 - hasql
+- katip
 - postgresql-libpq
 - stm
 - text

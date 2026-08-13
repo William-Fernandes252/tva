@@ -37,6 +37,7 @@ dependencies:
   - http-types
   - case-insensitive
   - containers
+  - katip
 
 executables:
   tva-video-worker:

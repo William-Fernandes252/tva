@@ -37,6 +37,7 @@ executable tva-api-server
     , bytestring
     , crypton
     , hasql
+    , katip
     , memory
     , mtl
     , rel8

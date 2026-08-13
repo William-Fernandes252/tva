@@ -41,6 +41,7 @@ executable tva-video-worker
     , http-client-tls
     , http-conduit
     , http-types
+    , katip
     , memory
     , mtl
     , rel8

@@ -21,6 +21,7 @@ library
       Domain.Core
       Domain.Database
       Domain.Event
+      Domain.Logger
       Domain.Queue
       Domain.Storage
   other-modules:
@@ -33,6 +34,7 @@ library
     , base >=4.17 && <5
     , bytestring
     , hasql
+    , katip
     , rel8 >=1.5
     , text >=2.0
     , time >=1.12
