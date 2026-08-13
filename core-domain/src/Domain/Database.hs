@@ -27,6 +27,7 @@ module Domain.Database
     updateJobToPending',
     updateJobToCompleted',
     updateJobToFailed',
+    resetZombieJobs',
 
     -- * Trigger initialization
     initJobStatusTrigger,
@@ -41,7 +42,10 @@ import Data.UUID (UUID)
 import Domain.Core
 import GHC.Generics (Generic)
 import Hasql.Connection qualified as Hasql (Connection)
+import Hasql.Decoders qualified as D
+import Hasql.Encoders qualified as E
 import Hasql.Session qualified as Hasql (run, sql, statement)
+import Hasql.Statement (Statement (..))
 import Rel8
 
 instance DBType (EntityId a) where
@@ -261,6 +265,25 @@ updateJobToFailed' conn vid err = do
             }
   _ <- Hasql.run (Hasql.statement () (run_ stmt)) conn
   return ()
+
+-- | Revert stalled 'Processing' jobs back to 'Pending' and return their IDs and source URLs.
+resetZombieJobs' :: Hasql.Connection -> IO [(EntityId Video, Text)]
+resetZombieJobs' conn = do
+  let sql =
+        "UPDATE video_jobs \
+        \SET status = 'PENDING', assigned_worker_id = NULL, progress_percent = NULL, error_message = NULL \
+        \WHERE status = 'PROCESSING' AND updated_at < NOW() - INTERVAL '1 hour' \
+        \RETURNING id, source_url"
+      decoder =
+        D.rowList $
+          (,)
+            <$> (EntityId <$> D.column (D.nonNullable D.uuid))
+            <*> D.column (D.nonNullable D.text)
+      stmt = Statement sql E.noParams decoder True
+  result <- Hasql.run (Hasql.statement () stmt) conn
+  case result of
+    Left err -> putStrLn ("[ERROR] resetZombieJobs failed: " ++ show err) >> return []
+    Right rows -> return rows
 
 -- | Initialize the PostgreSQL trigger that sends NOTIFY on job status changes.
 --   Idempotent — uses CREATE OR REPLACE, safe to call on every startup.

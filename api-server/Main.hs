@@ -7,15 +7,18 @@ module Main where
 
 import Api
 import Config
-import Control.Monad (guard)
+import Control.Concurrent (forkIO, threadDelay)
+import Control.Monad (forever, forM_, guard)
 import Control.Monad.IO.Class (MonadIO, liftIO)
+import Control.Monad.Reader (runReaderT)
+import Control.Monad.Except (runExceptT, MonadError)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime)
 import Data.UUID (UUID, fromText, toText)
 import Data.UUID.V4 (nextRandom)
 import Domain.Core (EntityId (..), JobState (..), Resolution, Video, resolutionFromTag, resolutionToTag, VideoJob(..))
-import Domain.Database (MonadDatabase (..), AnyVideoJob(..))
+import Domain.Database (MonadDatabase (..), AnyVideoJob(..), resetZombieJobs')
 import Control.Monad.Except (MonadError)
 import Domain.Event (SystemEvent (..))
 import Domain.Queue (MonadQueue (..))
@@ -95,11 +98,26 @@ parseObjectKey objKey = do
   res <- resolutionFromTag tag
   return (EntityId uuid, res)
 
+-- | Background thread that periodically resets stalled jobs and republishes them.
+sweeperThread :: AppConfig -> IO ()
+sweeperThread cfg = forever $ do
+  threadDelay (5 * 60 * 1000000) -- 5 minutes
+  putStrLn "[INFO] Sweeping for zombie jobs..."
+  rows <- resetZombieJobs' (appDbConn cfg)
+  forM_ rows $ \(vid, sourceUrl) -> do
+    putStrLn $ "[INFO] Reset zombie job: " <> show vid
+    case parseObjectKey sourceUrl of
+      Just (vId, res) -> do
+        _ <- runExceptT $ runReaderT (runAppM (publish (VideoUploadedEvent vId res))) cfg
+        return ()
+      Nothing -> putStrLn $ "[WARN] Could not parse resolution for zombie job: " <> show vid
+
 -- | Application Boot
 main :: IO ()
 main = do
   cfg <- initAppConfig
   let secret = appWebhookSecret cfg
+  _ <- forkIO (sweeperThread cfg)
   putStrLn "Starting api-server on port 8080..."
   let application = serve videoApi (hoistServer videoApi (nt cfg) (server secret))
   run 8080 application
