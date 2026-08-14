@@ -20,7 +20,7 @@ import Data.Maybe (fromMaybe)
 import System.Environment (lookupEnv)
 import Data.Time (NominalDiffTime)
 import Domain.Core (EntityId, Resolution, Video, Worker)
-import Domain.Database (MonadDatabase (..), findVideoJobById', insertPendingJob', updateJobToCompleted', updateJobToFailed', updateJobToPending', updateJobToProcessing')
+import Domain.Database (MonadDatabase (..), findVideoJobById', insertPendingJob', updateJobToCompleted', updateJobToFailed', updateJobToPending', updateJobToProcessing', updateJobProgress')
 import Domain.Event (SystemEvent)
 import Domain.Queue (MonadQueue (..))
 import Domain.Storage (MonadStorage (..))
@@ -96,6 +96,10 @@ instance MonadDatabase AppM where
   updateJobToFailed vid err = do
     conn <- asks appDbConn
     liftIO $ Domain.Database.updateJobToFailed' conn vid err
+
+  updateJobProgress vid prog = do
+    conn <- asks appDbConn
+    liftIO $ Domain.Database.updateJobProgress' conn vid prog
 
 -- | Initialize all infrastructure and return a unified 'AppConfig'.
 initAppConfig :: IO AppConfig

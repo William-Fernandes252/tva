@@ -16,6 +16,7 @@ import Control.Monad.Reader (MonadReader, ReaderT, ask, asks, local, runReaderT)
 import Data.Aeson qualified as Aeson
 import Data.ByteString.Char8 qualified as B8
 import Data.ByteString.Lazy qualified as BL
+import Data.Int (Int32)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.String (fromString)
@@ -36,8 +37,9 @@ import Network.AMQP.Types (FieldTable (FieldTable), FieldValue (FVString))
 import System.Directory (listDirectory, removeDirectoryRecursive)
 import System.Environment (lookupEnv)
 import System.FilePath (takeExtension, (</>))
+import System.IO (hGetLine, hIsEOF)
 import System.IO.Temp (createTempDirectory)
-import System.Process.Typed (proc, runProcess_)
+import System.Process.Typed (proc, runProcess_, setStdout, createPipe, withProcessWait, readProcessStdout_, getStdout, checkExitCode)
 
 -- | Configuration for the video worker, bundling all infrastructure handles.
 data WorkerConfig = WorkerConfig
@@ -249,6 +251,10 @@ instance MonadDatabase WorkerM where
     conn <- asks wDbConn
     liftIO $ Domain.Database.updateJobToFailed' conn vid err
 
+  updateJobProgress vid prog = do
+    conn <- asks wDbConn
+    liftIO $ Domain.Database.updateJobProgress' conn vid prog
+
 -- | Handle an incoming system event.
 --   Returns 'Right ()' on success (message should be acked).
 --   Returns 'Left errorMsg' on transient failure (consumer will retry/DLQ).
@@ -311,6 +317,8 @@ transcodeVideo vid res sourceKey = do
       scale = resolutionToScale res
       inputBucket = minioBucket minioCfg -- "raw-videos"
       outputBucket = minioOutputBucket minioCfg -- "processed-videos"
+  cfg <- ask
+  let dbConn = wDbConn cfg
   result <- liftIO $ try @SomeException $ do
     tmpDir <- createTempDirectory "/tmp" "tva-transcode"
 
@@ -319,43 +327,65 @@ transcodeVideo vid res sourceKey = do
     videoBytes <- downloadObject minioCfg inputBucket (encodeUtf8 sourceKey)
     BL.writeFile inputFile videoBytes
 
+    -- Get the exact duration in seconds using ffprobe
+    let probeCmd = proc "ffprobe" ["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", inputFile]
+    probeOut <- readProcessStdout_ probeCmd
+    let durationStr = T.strip $ T.pack $ B8.unpack $ BL.toStrict probeOut
+        totalDurationSeconds = fromMaybe 0.0 (readMaybe (T.unpack durationStr) :: Maybe Double)
+        totalDurationMs = round (totalDurationSeconds * 1000000) :: Integer
+
     -- FFmpeg: transcode to HLS with proper chunking
     --   -force_key_frames ensures clean segment boundaries every 2 seconds
     --   -hls_time 6: 6-second segments
     --   -hls_segment_type mpegts for broad compatibility
+    --   -progress pipe:1 outputs machine-readable progress to stdout
     let segmentPattern = tmpDir </> "segment_%03d.ts"
         outputPlaylist = tmpDir </> "output.m3u8"
-    runProcess_ $
-      proc
-        "ffmpeg"
-        [ "-i",
-          inputFile,
-          "-c:v",
-          "libx264",
-          "-preset",
-          "fast",
-          "-crf",
-          "23",
-          "-force_key_frames",
-          "expr:gte(t,n_forced*2)",
-          "-c:a",
-          "aac",
-          "-b:a",
-          "128k",
-          "-vf",
-          T.unpack scale,
-          "-f",
-          "hls",
-          "-hls_time",
-          "6",
-          "-hls_list_size",
-          "0",
-          "-hls_segment_type",
-          "mpegts",
-          "-hls_segment_filename",
-          segmentPattern,
-          outputPlaylist
-        ]
+        ffmpegProc =
+          setStdout createPipe $
+            proc
+              "ffmpeg"
+              [ "-i", inputFile,
+                "-c:v", "libx264",
+                "-preset", "fast",
+                "-crf", "23",
+                "-force_key_frames", "expr:gte(t,n_forced*2)",
+                "-c:a", "aac",
+                "-b:a", "128k",
+                "-vf", T.unpack scale,
+                "-f", "hls",
+                "-hls_time", "6",
+                "-hls_list_size", "0",
+                "-hls_segment_type", "mpegts",
+                "-hls_segment_filename", segmentPattern,
+                "-progress", "pipe:1",
+                "-nostats",
+                outputPlaylist
+              ]
+
+    withProcessWait ffmpegProc $ \p -> do
+      let outH = getStdout p
+          loop lastPct = do
+            eof <- hIsEOF outH
+            if eof then return () else do
+              line <- hGetLine outH
+              let tline = T.pack line
+              case T.stripPrefix "out_time_us=" tline of
+                Just usStr -> do
+                  let outTimeUs = fromMaybe 0 (readMaybe (T.unpack usStr) :: Maybe Integer)
+                      pct :: Int32
+                      pct = if totalDurationMs > 0
+                              then fromIntegral (min 100 ((outTimeUs * 100) `div` totalDurationMs))
+                              else 0
+                  if pct > lastPct
+                    then do
+                      Domain.Database.updateJobProgress' dbConn vid pct
+                      loop pct
+                    else loop lastPct
+                Nothing -> loop lastPct
+          
+      loop 0
+      checkExitCode p
 
     -- Collect and upload all HLS output files to processed-videos bucket
     files <- listDirectory tmpDir

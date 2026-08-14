@@ -27,6 +27,7 @@ module Domain.Database
     updateJobToPending',
     updateJobToCompleted',
     updateJobToFailed',
+    updateJobProgress',
     resetZombieJobs',
 
     -- * Trigger initialization
@@ -68,6 +69,8 @@ instance DBType JobState where
       toText Processing = "PROCESSING"
       toText Completed = "COMPLETED"
       toText Failed = "FAILED"
+
+instance DBEq JobState
 
 -- | Represents a row in the video_jobs table, corresponding to a VideoJob in the domain model.
 data VideoJobRow f = VideoJobRow
@@ -144,6 +147,9 @@ class (Monad m) => MonadDatabase m where
 
   -- | Mark a job as 'Failed', storing the error message.
   updateJobToFailed :: EntityId Video -> Text -> m ()
+
+  -- | Update the progress of a processing job.
+  updateJobProgress :: EntityId Video -> Int32 -> m ()
 
 -- | Insert a new video job with 'Pending' status.
 insertPendingJob' :: Hasql.Connection -> EntityId Video -> Text -> IO ()
@@ -266,6 +272,24 @@ updateJobToFailed' conn vid err = do
   _ <- Hasql.run (Hasql.statement () (run_ stmt)) conn
   return ()
 
+-- | Update the progress of a 'Processing' job.
+updateJobProgress' :: Hasql.Connection -> EntityId Video -> Int32 -> IO ()
+updateJobProgress' conn vid prog = do
+  let stmt =
+        update
+          Update
+            { target = videoJobTable,
+              from = pure (),
+              set = \_ row ->
+                row
+                  { progress = lit (Just prog)
+                  },
+              updateWhere = \_ row -> jobId row ==. lit vid &&. jobStatus row ==. lit Processing,
+              returning = NoReturning
+            }
+  _ <- Hasql.run (Hasql.statement () (run_ stmt)) conn
+  return ()
+
 -- | Revert stalled 'Processing' jobs back to 'Pending' and return their IDs and source URLs.
 resetZombieJobs' :: Hasql.Connection -> IO [(EntityId Video, Text)]
 resetZombieJobs' conn = do
@@ -294,7 +318,7 @@ initJobStatusTrigger conn = do
           [ "CREATE OR REPLACE FUNCTION notify_job_status_change() ",
             "RETURNS TRIGGER AS $$ ",
             "BEGIN ",
-            "IF (TG_OP = 'INSERT') OR (OLD.status IS DISTINCT FROM NEW.status) THEN ",
+            "IF (TG_OP = 'INSERT') OR (OLD.status IS DISTINCT FROM NEW.status) OR (OLD.progress_percent IS DISTINCT FROM NEW.progress_percent) THEN ",
             "PERFORM pg_notify('job_status_changed', ",
             "json_build_object(",
             "'videoId', NEW.id::text, ",
@@ -309,15 +333,17 @@ initJobStatusTrigger conn = do
             "END; ",
             "$$ LANGUAGE plpgsql;"
           ]
+      dropTriggerSql = "DROP TRIGGER IF EXISTS job_status_change_trigger ON video_jobs;" :: ByteString
       createTriggerSql =
         "CREATE TRIGGER job_status_change_trigger "
-          <> "AFTER INSERT OR UPDATE OF status "
+          <> "AFTER INSERT OR UPDATE OF status, progress_percent "
           <> "ON video_jobs "
           <> "FOR EACH ROW "
           <> "EXECUTE FUNCTION notify_job_status_change();" ::
           ByteString
 
   _ <- Hasql.run (Hasql.sql createFunctionSql) conn
+  _ <- Hasql.run (Hasql.sql dropTriggerSql) conn
   _ <- Hasql.run (Hasql.sql createTriggerSql) conn
   putStrLn "[INFO] PostgreSQL trigger 'job_status_change_trigger' initialized."
   return ()
