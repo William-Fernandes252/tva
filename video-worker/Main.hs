@@ -27,8 +27,8 @@ import Data.UUID (toText)
 import Data.UUID.V4 (nextRandom)
 import Domain.Core (EntityId (..), Resolution (..), Video, VideoJob (..), Worker, finishJob, resolutionToTag)
 import Domain.Database
-import Domain.Logger
 import Domain.Event (SystemEvent (..))
+import Domain.Logger
 import Domain.Queue (MonadQueue (..))
 import Hasql.Connection qualified as Hasql (Connection, acquire, settings)
 import MinIO (MinioConfig (..), downloadObject, initMinIO, uploadObject)
@@ -39,7 +39,7 @@ import System.Environment (lookupEnv)
 import System.FilePath (takeExtension, (</>))
 import System.IO (hGetLine, hIsEOF)
 import System.IO.Temp (createTempDirectory)
-import System.Process.Typed (proc, runProcess_, setStdout, createPipe, withProcessWait, readProcessStdout_, getStdout, checkExitCode)
+import System.Process.Typed (checkExitCode, createPipe, getStdout, proc, readProcessStdout_, runProcess_, setStdout, withProcessWait)
 
 -- | Configuration for the video worker, bundling all infrastructure handles.
 data WorkerConfig = WorkerConfig
@@ -110,23 +110,25 @@ dlqName = "video_dlq"
 setupDeadLetterInfrastructure :: WorkerConfig -> IO ()
 setupDeadLetterInfrastructure cfg = runKatipContextT (wLogEnv cfg) (mempty :: LogContexts) "video-worker" $ do
   let chan = wRabbitChan cfg
-  liftIO $ declareExchange
-    chan
-    newExchange
-      { exchangeName = dlxName,
-        exchangeType = "topic",
-        exchangeDurable = True
-      }
-
-  _ <- liftIO $ 
-    declareQueue
+  liftIO $
+    declareExchange
       chan
-      newQueue
-        { queueName = dlqName,
-          queueDurable = True,
-          queueExclusive = False,
-          queueAutoDelete = False
+      newExchange
+        { exchangeName = dlxName,
+          exchangeType = "topic",
+          exchangeDurable = True
         }
+
+  _ <-
+    liftIO $
+      declareQueue
+        chan
+        newQueue
+          { queueName = dlqName,
+            queueDurable = True,
+            queueExclusive = False,
+            queueAutoDelete = False
+          }
 
   liftIO $ bindQueue chan dlqName dlxName "#"
 
@@ -150,15 +152,16 @@ setupConsumer cfg handler = runKatipContextT (wLogEnv cfg) (mempty :: LogContext
   liftIO $ setupDeadLetterInfrastructure cfg
 
   -- Declare main queue
-  _ <- liftIO $ 
-    declareQueue
-      chan
-      newQueue
-        { queueName = "video_upload_queue",
-          queueDurable = True,
-          queueExclusive = False,
-          queueAutoDelete = False
-        }
+  _ <-
+    liftIO $
+      declareQueue
+        chan
+        newQueue
+          { queueName = "video_upload_queue",
+            queueDurable = True,
+            queueExclusive = False,
+            queueAutoDelete = False
+          }
 
   liftIO $ bindQueue chan "video_upload_queue" "video_exchange" "video.uploaded"
 
@@ -345,20 +348,34 @@ transcodeVideo vid res sourceKey = do
           setStdout createPipe $
             proc
               "ffmpeg"
-              [ "-i", inputFile,
-                "-c:v", "libx264",
-                "-preset", "fast",
-                "-crf", "23",
-                "-force_key_frames", "expr:gte(t,n_forced*2)",
-                "-c:a", "aac",
-                "-b:a", "128k",
-                "-vf", T.unpack scale,
-                "-f", "hls",
-                "-hls_time", "6",
-                "-hls_list_size", "0",
-                "-hls_segment_type", "mpegts",
-                "-hls_segment_filename", segmentPattern,
-                "-progress", "pipe:1",
+              [ "-i",
+                inputFile,
+                "-c:v",
+                "libx264",
+                "-preset",
+                "fast",
+                "-crf",
+                "23",
+                "-force_key_frames",
+                "expr:gte(t,n_forced*2)",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                "-vf",
+                T.unpack scale,
+                "-f",
+                "hls",
+                "-hls_time",
+                "6",
+                "-hls_list_size",
+                "0",
+                "-hls_segment_type",
+                "mpegts",
+                "-hls_segment_filename",
+                segmentPattern,
+                "-progress",
+                "pipe:1",
                 "-nostats",
                 outputPlaylist
               ]
@@ -367,23 +384,26 @@ transcodeVideo vid res sourceKey = do
       let outH = getStdout p
           loop lastPct = do
             eof <- hIsEOF outH
-            if eof then return () else do
-              line <- hGetLine outH
-              let tline = T.pack line
-              case T.stripPrefix "out_time_us=" tline of
-                Just usStr -> do
-                  let outTimeUs = fromMaybe 0 (readMaybe (T.unpack usStr) :: Maybe Integer)
-                      pct :: Int32
-                      pct = if totalDurationMs > 0
-                              then fromIntegral (min 100 ((outTimeUs * 100) `div` totalDurationMs))
-                              else 0
-                  if pct > lastPct
-                    then do
-                      Domain.Database.updateJobProgress' dbConn vid pct
-                      loop pct
-                    else loop lastPct
-                Nothing -> loop lastPct
-          
+            if eof
+              then return ()
+              else do
+                line <- hGetLine outH
+                let tline = T.pack line
+                case T.stripPrefix "out_time_us=" tline of
+                  Just usStr -> do
+                    let outTimeUs = fromMaybe 0 (readMaybe (T.unpack usStr) :: Maybe Integer)
+                        pct :: Int32
+                        pct =
+                          if totalDurationMs > 0
+                            then fromIntegral (min 100 ((outTimeUs * 100) `div` totalDurationMs))
+                            else 0
+                    if pct > lastPct
+                      then do
+                        Domain.Database.updateJobProgress' dbConn vid pct
+                        loop pct
+                      else loop lastPct
+                  Nothing -> loop lastPct
+
       loop 0
       checkExitCode p
 
@@ -449,13 +469,14 @@ main = do
     chan <- liftIO $ openChannel conn
 
     -- Declare the topic exchange (idempotent — fine if api-server already did it).
-    liftIO $ declareExchange
-      chan
-      newExchange
-        { exchangeName = "video_exchange",
-          exchangeType = "topic",
-          exchangeDurable = True
-        }
+    liftIO $
+      declareExchange
+        chan
+        newExchange
+          { exchangeName = "video_exchange",
+            exchangeType = "topic",
+            exchangeDurable = True
+          }
     $(logTM) InfoS "Connected to RabbitMQ"
 
     -- Generate a random worker ID.
@@ -476,7 +497,7 @@ main = do
     mMaxDelay <- liftIO $ lookupEnv "RETRY_MAX_DELAY_SECONDS"
     let retryMaxDelaySeconds = fromMaybe 60 (mMaxDelay >>= readMaybe)
     let retryCfg = RetryConfig {retryMaxAttempts, retryBaseDelaySeconds, retryMaxDelaySeconds}
-    
+
     katipAddContext (sl "maxAttempts" retryMaxAttempts <> sl "baseDelay" retryBaseDelaySeconds <> sl "maxDelay" retryMaxDelaySeconds) $
       $(logTM) InfoS "Retry config loaded"
 
