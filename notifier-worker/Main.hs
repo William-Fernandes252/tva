@@ -24,7 +24,8 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8)
 import Database.PostgreSQL.LibPQ qualified as PQ
-import Domain.Database (initJobStatusTrigger)
+import Adapters.PostgreSQL (initJobStatusTrigger)
+import Adapters.PostgreSQL qualified
 import Domain.Logger
 import GHC.Generics (Generic)
 import Hasql.Connection qualified as Hasql
@@ -136,17 +137,7 @@ main = do
     pgPass <- liftIO $ fromMaybe "video_password" <$> lookupEnv "PG_PASS"
     pgDb <- liftIO $ fromMaybe "video_db" <$> lookupEnv "PG_DB"
 
-    let connSettings =
-          Hasql.settings
-            (fromString pgHost)
-            (fromIntegral pgPort)
-            (fromString pgUser)
-            (fromString pgPass)
-            (fromString pgDb)
-    hasqlResult <- liftIO $ Hasql.acquire connSettings
-    hasqlConn <- case hasqlResult of
-      Left err -> error $ "Failed to connect to PostgreSQL (Hasql): " <> show err
-      Right c -> return c
+    hasqlConn <- liftIO Adapters.PostgreSQL.initPostgreSQL
     $(logTM) InfoS "Connected to PostgreSQL (Hasql)"
 
     -- Initialize the DB trigger (idempotent).

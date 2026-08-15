@@ -19,7 +19,8 @@ import Data.Time (NominalDiffTime)
 import Data.UUID (UUID, fromText, toText)
 import Data.UUID.V4 (nextRandom)
 import Domain.Core (EntityId (..), JobState (..), Resolution, Video, resolutionFromTag, resolutionToTag, VideoJob(..))
-import Domain.Database (MonadDatabase (..), AnyVideoJob(..), resetZombieJobs')
+import Domain.Database (MonadDatabase (..), AnyVideoJob(..))
+import Adapters.PostgreSQL qualified
 import Control.Monad.Except (MonadError)
 import Domain.Event (SystemEvent (..))
 import Domain.Queue (MonadQueue (..))
@@ -106,7 +107,7 @@ sweeperThread cfg = forever $ do
   threadDelay (5 * 60 * 1000000) -- 5 minutes
   runKatipContextT (appLogEnv cfg) (mempty :: LogContexts) "api-server" $ do
     $(logTM) InfoS "Sweeping for zombie jobs..."
-    rows <- liftIO $ resetZombieJobs' (appDbConn cfg)
+    rows <- liftIO $ Adapters.PostgreSQL.resetZombieJobs (appDbConn cfg)
     forM_ rows $ \(vid, sourceUrl) -> do
       katipAddContext (sl "videoId" (show vid)) $ do
         $(logTM) InfoS "Reset zombie job"

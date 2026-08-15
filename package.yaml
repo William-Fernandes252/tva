@@ -25,6 +25,7 @@ dependencies:
 library:
   source-dirs: core-domain/src
   exposed-modules:
+    - Adapters.PostgreSQL
     - Domain.Core
     - Domain.Database
     - Domain.Event

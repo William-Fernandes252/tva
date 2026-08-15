@@ -7,6 +7,7 @@
 module Config where
 
 import Adapters.PostgreSQL (initPostgreSQL)
+import Adapters.PostgreSQL qualified
 import Adapters.RabbitMQ (RabbitConfig, initRabbitMQ, publish)
 import Adapters.S3 (S3Config, generateUploadUrl, initMinioEnv)
 import Control.Exception (SomeException, try)
@@ -20,7 +21,7 @@ import Data.Maybe (fromMaybe)
 import System.Environment (lookupEnv)
 import Data.Time (NominalDiffTime)
 import Domain.Core (EntityId, Resolution, Video, Worker)
-import Domain.Database (MonadDatabase (..), findVideoJobById', insertPendingJob', updateJobToCompleted', updateJobToFailed', updateJobToPending', updateJobToProcessing', updateJobProgress')
+import Domain.Database (MonadDatabase (..))
 import Domain.Event (SystemEvent)
 import Domain.Queue (MonadQueue (..))
 import Domain.Storage (MonadStorage (..))
@@ -74,35 +75,35 @@ instance MonadQueue SystemEvent AppM where
   consume _handler =
     $(logTM) WarningS "Consume not implemented for api-server."
 
--- | MonadDatabase instance: delegates to the standalone functions in Domain.Database.
+-- | MonadDatabase instance: delegates to the standalone functions in Adapters.PostgreSQL.
 instance MonadDatabase AppM where
   insertPendingJob vid source = do
     conn <- asks appDbConn
-    liftIO $ Domain.Database.insertPendingJob' conn vid source
+    liftIO $ Adapters.PostgreSQL.insertPendingJob conn vid source
 
   findVideoJobById vid = do
     conn <- asks appDbConn
-    liftIO $ Domain.Database.findVideoJobById' conn vid
+    liftIO $ Adapters.PostgreSQL.findVideoJobById conn vid
 
   updateJobToProcessing vid worker = do
     conn <- asks appDbConn
-    liftIO $ Domain.Database.updateJobToProcessing' conn vid worker
+    liftIO $ Adapters.PostgreSQL.updateJobToProcessing conn vid worker
 
   updateJobToPending vid = do
     conn <- asks appDbConn
-    liftIO $ Domain.Database.updateJobToPending' conn vid
+    liftIO $ Adapters.PostgreSQL.updateJobToPending conn vid
 
   updateJobToCompleted vid chunks = do
     conn <- asks appDbConn
-    liftIO $ Domain.Database.updateJobToCompleted' conn vid chunks
+    liftIO $ Adapters.PostgreSQL.updateJobToCompleted conn vid chunks
 
   updateJobToFailed vid err = do
     conn <- asks appDbConn
-    liftIO $ Domain.Database.updateJobToFailed' conn vid err
+    liftIO $ Adapters.PostgreSQL.updateJobToFailed conn vid err
 
   updateJobProgress vid prog = do
     conn <- asks appDbConn
-    liftIO $ Domain.Database.updateJobProgress' conn vid prog
+    liftIO $ Adapters.PostgreSQL.updateJobProgress conn vid prog
 
 -- | Initialize all infrastructure and return a unified 'AppConfig'.
 initAppConfig :: IO AppConfig

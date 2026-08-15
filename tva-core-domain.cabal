@@ -18,6 +18,7 @@ extra-doc-files:
 
 library
   exposed-modules:
+      Adapters.PostgreSQL
       Domain.Core
       Domain.Database
       Domain.Event

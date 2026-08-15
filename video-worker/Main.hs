@@ -26,7 +26,8 @@ import Data.Text.Encoding (encodeUtf8, decodeUtf8)
 import Data.UUID (toText)
 import Data.UUID.V4 (nextRandom)
 import Domain.Core (EntityId (..), Resolution (..), Video, VideoJob (..), Worker, finishJob, resolutionToTag)
-import Domain.Database
+import Domain.Database (AnyVideoJob (..), MonadDatabase (..))
+import Adapters.PostgreSQL qualified
 import Domain.Event (SystemEvent (..))
 import Domain.Logger
 import Domain.Queue (MonadQueue (..))
@@ -233,31 +234,31 @@ instance MonadQueue SystemEvent WorkerM where
 instance MonadDatabase WorkerM where
   insertPendingJob vid source = do
     conn <- asks wDbConn
-    liftIO $ Domain.Database.insertPendingJob' conn vid source
+    liftIO $ Adapters.PostgreSQL.insertPendingJob conn vid source
 
   findVideoJobById vid = do
     conn <- asks wDbConn
-    liftIO $ Domain.Database.findVideoJobById' conn vid
+    liftIO $ Adapters.PostgreSQL.findVideoJobById conn vid
 
   updateJobToProcessing vid worker = do
     conn <- asks wDbConn
-    liftIO $ Domain.Database.updateJobToProcessing' conn vid worker
+    liftIO $ Adapters.PostgreSQL.updateJobToProcessing conn vid worker
 
   updateJobToPending vid = do
     conn <- asks wDbConn
-    liftIO $ Domain.Database.updateJobToPending' conn vid
+    liftIO $ Adapters.PostgreSQL.updateJobToPending conn vid
 
   updateJobToCompleted vid chunks = do
     conn <- asks wDbConn
-    liftIO $ Domain.Database.updateJobToCompleted' conn vid chunks
+    liftIO $ Adapters.PostgreSQL.updateJobToCompleted conn vid chunks
 
   updateJobToFailed vid err = do
     conn <- asks wDbConn
-    liftIO $ Domain.Database.updateJobToFailed' conn vid err
+    liftIO $ Adapters.PostgreSQL.updateJobToFailed conn vid err
 
   updateJobProgress vid prog = do
     conn <- asks wDbConn
-    liftIO $ Domain.Database.updateJobProgress' conn vid prog
+    liftIO $ Adapters.PostgreSQL.updateJobProgress conn vid prog
 
 -- | Handle an incoming system event.
 --   Returns 'Right ()' on success (message should be acked).
@@ -377,23 +378,7 @@ main = do
     $(logTM) InfoS "=== TVA Video Worker ==="
 
     -- Initialize PostgreSQL connection pool.
-    pgHost <- liftIO $ fromMaybe "127.0.0.1" <$> lookupEnv "PG_HOST"
-    mPgPort <- liftIO $ lookupEnv "PG_PORT"
-    let pgPort = fromMaybe 5432 (mPgPort >>= readMaybe)
-    pgUser <- liftIO $ fromMaybe "video_user" <$> lookupEnv "PG_USER"
-    pgPass <- liftIO $ fromMaybe "video_password" <$> lookupEnv "PG_PASS"
-    pgDb <- liftIO $ fromMaybe "video_db" <$> lookupEnv "PG_DB"
-    let connSettings =
-          Hasql.settings
-            (fromString pgHost)
-            (fromIntegral pgPort)
-            (fromString pgUser)
-            (fromString pgPass)
-            (fromString pgDb)
-    result <- liftIO $ Hasql.acquire connSettings
-    dbConn <- case result of
-      Left err -> error $ "Failed to connect to PostgreSQL: " ++ show err
-      Right c -> return c
+    dbConn <- liftIO Adapters.PostgreSQL.initPostgreSQL
     $(logTM) InfoS "Connected to PostgreSQL"
 
     -- Initialize RabbitMQ connection.
