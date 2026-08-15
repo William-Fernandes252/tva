@@ -24,6 +24,7 @@ library
       Domain.Logger
       Domain.Queue
       Domain.Storage
+      Domain.Transcoder
   other-modules:
       Paths_tva_core_domain
   hs-source-dirs:

@@ -32,14 +32,14 @@ import Domain.Logger
 import Domain.Queue (MonadQueue (..))
 import Hasql.Connection qualified as Hasql (Connection, acquire, settings)
 import MinIO (MinioConfig (..), downloadObject, initMinIO, uploadObject)
+import Domain.Transcoder (MonadTranscoder (..))
+import Adapters.FFmpeg (runFFmpeg)
 import Network.AMQP
 import Network.AMQP.Types (FieldTable (FieldTable), FieldValue (FVString))
 import System.Directory (listDirectory, removeDirectoryRecursive)
 import System.Environment (lookupEnv)
 import System.FilePath (takeExtension, (</>))
-import System.IO (hGetLine, hIsEOF)
 import System.IO.Temp (createTempDirectory)
-import System.Process.Typed (checkExitCode, createPipe, getStdout, proc, readProcessStdout_, runProcess_, setStdout, withProcessWait)
 
 -- | Configuration for the video worker, bundling all infrastructure handles.
 data WorkerConfig = WorkerConfig
@@ -298,13 +298,15 @@ handleEvent (TranscodeFailedEvent _vid _err) = do
   $(logTM) InfoS "Received TranscodeFailedEvent (not yet handled)."
   return $ Right ()
 
--- | Map a resolution to an FFmpeg scale filter.
-resolutionToScale :: Resolution -> Text
-resolutionToScale R1080p = "scale=1920:1080"
-resolutionToScale R720p = "scale=1280:720"
-resolutionToScale R480p = "scale=854:480"
 
 -- | Transcode a video: download from MinIO, run FFmpeg to produce HLS chunks,
+instance MonadTranscoder WorkerM where
+  transcode inputPath outPath res onProgress = do
+    env <- ask
+    liftIO $ runFFmpeg inputPath outPath res (\pct -> runReaderT (runWorkerM (onProgress pct)) env)
+
+-- | Transcode a video into HLS format and upload the chunks to object storage.
+--   Downloads the video from the 'raw-videos' bucket, uses `MonadTranscoder` to transcode,
 --   upload segments organized by resolution, return output paths.
 transcodeVideo ::
   EntityId Video ->
@@ -317,118 +319,40 @@ transcodeVideo vid res sourceKey = do
       uuidText = toText' vid
       -- Output directory: "{uuid}/{resolution}/"
       outputDir = uuidText <> "/" <> tag
-      scale = resolutionToScale res
       inputBucket = minioBucket minioCfg -- "raw-videos"
       outputBucket = minioOutputBucket minioCfg -- "processed-videos"
-  cfg <- ask
-  let dbConn = wDbConn cfg
-  result <- liftIO $ try @SomeException $ do
-    tmpDir <- createTempDirectory "/tmp" "tva-transcode"
+  
+  liftIO (try @SomeException (createTempDirectory "/tmp" "tva-transcode")) >>= \case
+    Left (e :: SomeException) -> return $ Left $ T.pack (show e)
+    Right tmpDir -> do
+      env <- ask
+      transcodeResult <- liftIO $ try @SomeException $ runReaderT (runWorkerM $ do
+        -- Download source video from raw-videos bucket
+        let inputFile = tmpDir </> "input.mkv"
+        videoBytes <- liftIO $ downloadObject minioCfg inputBucket (encodeUtf8 sourceKey)
+        liftIO $ BL.writeFile inputFile videoBytes
 
-    -- Download source video from raw-videos bucket
-    let inputFile = tmpDir </> "input.mkv"
-    videoBytes <- downloadObject minioCfg inputBucket (encodeUtf8 sourceKey)
-    BL.writeFile inputFile videoBytes
+        -- Use MonadTranscoder seam
+        outputFiles <- transcode inputFile tmpDir res (\pct -> updateJobProgress vid pct)
 
-    -- Get the exact duration in seconds using ffprobe
-    let probeCmd = proc "ffprobe" ["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", inputFile]
-    probeOut <- readProcessStdout_ probeCmd
-    let durationStr = T.strip $ T.pack $ B8.unpack $ BL.toStrict probeOut
-        totalDurationSeconds = fromMaybe 0.0 (readMaybe (T.unpack durationStr) :: Maybe Double)
-        totalDurationMs = round (totalDurationSeconds * 1000000) :: Integer
+        -- Collect and upload all HLS output files to processed-videos bucket
+        liftIO $ mapM_
+          ( \f -> do
+              let localPath = tmpDir </> f
+                  objectKey = encodeUtf8 outputDir <> "/" <> encodeUtf8 (T.pack f)
+              uploadObject minioCfg outputBucket objectKey localPath
+          )
+          outputFiles
 
-    -- FFmpeg: transcode to HLS with proper chunking
-    --   -force_key_frames ensures clean segment boundaries every 2 seconds
-    --   -hls_time 6: 6-second segments
-    --   -hls_segment_type mpegts for broad compatibility
-    --   -progress pipe:1 outputs machine-readable progress to stdout
-    let segmentPattern = tmpDir </> "segment_%03d.ts"
-        outputPlaylist = tmpDir </> "output.m3u8"
-        ffmpegProc =
-          setStdout createPipe $
-            proc
-              "ffmpeg"
-              [ "-i",
-                inputFile,
-                "-c:v",
-                "libx264",
-                "-preset",
-                "fast",
-                "-crf",
-                "23",
-                "-force_key_frames",
-                "expr:gte(t,n_forced*2)",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "128k",
-                "-vf",
-                T.unpack scale,
-                "-f",
-                "hls",
-                "-hls_time",
-                "6",
-                "-hls_list_size",
-                "0",
-                "-hls_segment_type",
-                "mpegts",
-                "-hls_segment_filename",
-                segmentPattern,
-                "-progress",
-                "pipe:1",
-                "-nostats",
-                outputPlaylist
-              ]
+        -- Build the list of output paths for the 'FinishedJob' constructor
+        let outputPaths = map (\f -> outputDir <> "/" <> T.pack f) outputFiles
+        return outputPaths
+        ) env
 
-    withProcessWait ffmpegProc $ \p -> do
-      let outH = getStdout p
-          loop lastPct = do
-            eof <- hIsEOF outH
-            if eof
-              then return ()
-              else do
-                line <- hGetLine outH
-                let tline = T.pack line
-                case T.stripPrefix "out_time_us=" tline of
-                  Just usStr -> do
-                    let outTimeUs = fromMaybe 0 (readMaybe (T.unpack usStr) :: Maybe Integer)
-                        pct :: Int32
-                        pct =
-                          if totalDurationMs > 0
-                            then fromIntegral (min 100 ((outTimeUs * 100) `div` totalDurationMs))
-                            else 0
-                    if pct > lastPct
-                      then do
-                        Domain.Database.updateJobProgress' dbConn vid pct
-                        loop pct
-                      else loop lastPct
-                  Nothing -> loop lastPct
-
-      loop 0
-      checkExitCode p
-
-    -- Collect and upload all HLS output files to processed-videos bucket
-    files <- listDirectory tmpDir
-    let outputFiles = filter (\f -> takeExtension f `elem` [".m3u8", ".ts"]) files
-    mapM_
-      ( \f -> do
-          let localPath = tmpDir </> f
-              objectKey = encodeUtf8 outputDir <> "/" <> encodeUtf8 (T.pack f)
-          uploadObject minioCfg outputBucket objectKey localPath
-      )
-      outputFiles
-
-    -- Build the list of output paths for the 'FinishedJob' constructor
-    let outputPaths = map (\f -> outputDir <> "/" <> T.pack f) outputFiles
-
-    removeDirectoryRecursive tmpDir
-    return outputPaths
-
-  case result of
-    Left (e :: SomeException) ->
-      return $ Left $ T.pack (show e)
-    Right paths ->
-      return $ Right paths
+      liftIO $ removeDirectoryRecursive tmpDir
+      case transcodeResult of
+        Left (e :: SomeException) -> return $ Left $ T.pack (show e)
+        Right paths -> return $ Right paths
 
 -- | Extract the UUID text from an EntityId.
 toText' :: EntityId a -> Text

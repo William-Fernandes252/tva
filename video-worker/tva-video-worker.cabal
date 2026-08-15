@@ -19,6 +19,7 @@ extra-doc-files:
 executable tva-video-worker
   main-is: Main.hs
   other-modules:
+      Adapters.FFmpeg
       MinIO
       Paths_tva_video_worker
   hs-source-dirs:
