@@ -146,8 +146,9 @@ downloadObject ::
   MinioConfig ->
   BS.ByteString ->
   BS.ByteString ->
-  m BL.ByteString
-downloadObject cfg bucket objectKey = liftIO $ do
+  FilePath ->
+  m ()
+downloadObject cfg bucket objectKey destPath = liftIO $ do
   now <- getCurrentTime
   let scheme = if minioSecure cfg then "https" else "http"
       host = minioEndpoint cfg
@@ -165,7 +166,7 @@ downloadObject cfg bucket objectKey = liftIO $ do
   manager <- newManager tlsManagerSettings
   response <- httpLbs signedReq manager
   if statusIsSuccessful (responseStatus response)
-    then return (responseBody response)
+    then BL.writeFile destPath (responseBody response)
     else error $ "MinIO download failed: " <> show (responseStatus response)
 
 uploadObject ::

@@ -22,7 +22,7 @@ import Data.Maybe (fromMaybe)
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Text.Encoding (encodeUtf8)
+import Data.Text.Encoding (encodeUtf8, decodeUtf8)
 import Data.UUID (toText)
 import Data.UUID.V4 (nextRandom)
 import Domain.Core (EntityId (..), Resolution (..), Video, VideoJob (..), Worker, finishJob, resolutionToTag)
@@ -32,6 +32,7 @@ import Domain.Logger
 import Domain.Queue (MonadQueue (..))
 import Hasql.Connection qualified as Hasql (Connection, acquire, settings)
 import MinIO (MinioConfig (..), downloadObject, initMinIO, uploadObject)
+import Domain.Storage (MonadStorage (..))
 import Domain.Transcoder (MonadTranscoder (..))
 import Adapters.FFmpeg (runFFmpeg)
 import Network.AMQP
@@ -299,6 +300,18 @@ handleEvent (TranscodeFailedEvent _vid _err) = do
   return $ Right ()
 
 
+-- | MonadStorage instance: delegates to MinIO adapter.
+instance MonadStorage WorkerM where
+  generateUploadUrl _ _ _ = error "generateUploadUrl not implemented in worker"
+  
+  downloadBlob bucket objectKey destPath = do
+    cfg <- asks wMinio
+    liftIO $ downloadObject cfg (encodeUtf8 bucket) (encodeUtf8 objectKey) destPath
+
+  uploadBlob bucket objectKey sourcePath = do
+    cfg <- asks wMinio
+    liftIO $ uploadObject cfg (encodeUtf8 bucket) (encodeUtf8 objectKey) sourcePath
+
 -- | Transcode a video: download from MinIO, run FFmpeg to produce HLS chunks,
 instance MonadTranscoder WorkerM where
   transcode inputPath outPath res onProgress = do
@@ -319,8 +332,8 @@ transcodeVideo vid res sourceKey = do
       uuidText = toText' vid
       -- Output directory: "{uuid}/{resolution}/"
       outputDir = uuidText <> "/" <> tag
-      inputBucket = minioBucket minioCfg -- "raw-videos"
-      outputBucket = minioOutputBucket minioCfg -- "processed-videos"
+      inputBucket = decodeUtf8 (minioBucket minioCfg) -- "raw-videos"
+      outputBucket = decodeUtf8 (minioOutputBucket minioCfg) -- "processed-videos"
   
   liftIO (try @SomeException (createTempDirectory "/tmp" "tva-transcode")) >>= \case
     Left (e :: SomeException) -> return $ Left $ T.pack (show e)
@@ -329,18 +342,17 @@ transcodeVideo vid res sourceKey = do
       transcodeResult <- liftIO $ try @SomeException $ runReaderT (runWorkerM $ do
         -- Download source video from raw-videos bucket
         let inputFile = tmpDir </> "input.mkv"
-        videoBytes <- liftIO $ downloadObject minioCfg inputBucket (encodeUtf8 sourceKey)
-        liftIO $ BL.writeFile inputFile videoBytes
+        downloadBlob inputBucket sourceKey inputFile
 
         -- Use MonadTranscoder seam
         outputFiles <- transcode inputFile tmpDir res (\pct -> updateJobProgress vid pct)
 
         -- Collect and upload all HLS output files to processed-videos bucket
-        liftIO $ mapM_
+        mapM_
           ( \f -> do
               let localPath = tmpDir </> f
-                  objectKey = encodeUtf8 outputDir <> "/" <> encodeUtf8 (T.pack f)
-              uploadObject minioCfg outputBucket objectKey localPath
+                  objectKey = outputDir <> "/" <> T.pack f
+              uploadBlob outputBucket objectKey localPath
           )
           outputFiles
 

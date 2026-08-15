@@ -14,3 +14,11 @@ class Monad m => MonadStorage m where
   -- Takes the Video ID (for the object key), the desired resolution,
   -- and a time-to-live (TTL).
   generateUploadUrl :: EntityId Video -> Resolution -> NominalDiffTime -> m Text
+
+  -- | Downloads a blob from a bucket to a local file path.
+  --   Takes: Bucket name, Object Key, Destination FilePath
+  downloadBlob :: Text -> Text -> FilePath -> m ()
+
+  -- | Uploads a local file to a blob storage bucket.
+  --   Takes: Bucket name, Object Key, Source FilePath
+  uploadBlob :: Text -> Text -> FilePath -> m ()

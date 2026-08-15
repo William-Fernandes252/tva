@@ -59,6 +59,9 @@ instance MonadStorage AppM where
   generateUploadUrl videoId res ttl = do
     s3cfg <- asks appS3Config
     Adapters.S3.generateUploadUrl s3cfg videoId res ttl
+    
+  downloadBlob _bucket _key _dest = error "downloadBlob not implemented in API server"
+  uploadBlob _bucket _key _src = error "uploadBlob not implemented in API server"
 
 -- | MonadQueue instance: delegates to the RabbitMQ adapter using the config extractor.
 instance MonadQueue SystemEvent AppM where
