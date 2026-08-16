@@ -64,8 +64,8 @@ initMinioEnv = do
 
   let (schemeStr, rest) = break (== ':') endpointStr
       authority = case rest of
-        ('/':'/':hp) -> hp
-        _            -> rest
+        (':':'/':'/':hp) -> hp
+        _                -> rest
       secure = schemeStr == "https"
 
   return $ S3Config

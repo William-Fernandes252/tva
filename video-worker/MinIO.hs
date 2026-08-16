@@ -55,7 +55,7 @@ initMinIO = do
 
   let (schemeStr, rest) = break (== ':') endpointStr
       authority = case rest of
-        ('/' : '/' : hp) -> hp
+        (':' : '/' : '/' : hp) -> hp
         _ -> rest
       secure = schemeStr == "https"
 

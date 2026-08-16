@@ -1,0 +1,40 @@
+cabal-version: 1.12
+
+-- This file has been generated from package.yaml by hpack version 0.39.6.
+--
+-- see: https://github.com/sol/hpack
+
+name:           tva-e2e
+version:        0.1.0.0
+synopsis:       End-to-end tests for the tva service
+description:    E2E testing framework for the tva video-processing service using docker-compose.
+author:         William Fernandes Dias
+maintainer:     William Fernandes Dias
+license:        MIT
+build-type:     Simple
+
+test-suite tva-e2e-test
+  type: exitcode-stdio-1.0
+  main-is: Spec.hs
+  other-modules:
+      E2ESpec
+      Paths_tva_e2e
+  hs-source-dirs:
+      test
+  ghc-options: -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      aeson
+    , base >=4.17 && <5
+    , bytestring
+    , containers
+    , hspec
+    , hspec-core
+    , http-client
+    , http-client-tls
+    , http-conduit
+    , http-types
+    , network-uri
+    , text
+    , time
+    , typed-process
+  default-language: GHC2021

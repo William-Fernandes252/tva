@@ -32,7 +32,7 @@ import Servant
 -- | Polymorphic server implementation for the VideoAPI.
 --   Works in any monad that supports storage, queue, database, and IO operations.
 server :: (MonadStorage m, MonadQueue SystemEvent m, MonadDatabase m, MonadIO m, MonadError ServerError m) => Text -> ServerT VideoAPI m
-server webhookSecret = requestUpload :<|> checkStatus :<|> handleMinioWebhook
+server webhookSecret = requestUpload :<|> checkStatus :<|> handleMinioWebhook :<|> checkHealth
   where
     -- \| Handler for POST /videos
     --   Generates a presigned upload URL and inserts a Pending job into the database.
@@ -60,7 +60,7 @@ server webhookSecret = requestUpload :<|> checkStatus :<|> handleMinioWebhook
           FailedJob _ err -> return $ StatusResponse Failed Nothing (Just err)
         Nothing -> throwError err404 { errBody = "Video job not found" }
 
-    -- \| Handler for POST /webhooks/minio
+    -- | Handler for POST /webhooks/minio
     handleMinioWebhook :: (MonadQueue SystemEvent m, MonadIO m, MonadError ServerError m) => Maybe Text -> MinioWebhookEvent -> m NoContent
     handleMinioWebhook mAuthHeader event = do
       let expectedToken = "Bearer " <> webhookSecret
@@ -76,6 +76,10 @@ server webhookSecret = requestUpload :<|> checkStatus :<|> handleMinioWebhook
                 Just (videoId, resolution) -> do
                   publish $ VideoUploadedEvent videoId resolution
                   return NoContent
+
+    -- | Handler for GET /health
+    checkHealth :: (Monad m) => m NoContent
+    checkHealth = return NoContent
 
 -- | Check whether the webhook event is an s3:ObjectCreated:Put notification.
 isObjectCreated :: MinioWebhookEvent -> Bool
@@ -94,8 +98,8 @@ extractKey (MinioWebhookEvent _ mKey recs) =
 parseObjectKey :: Text -> Maybe (EntityId Video, Resolution)
 parseObjectKey objKey = do
   base <- T.stripSuffix ".mkv" objKey
-  let (uuidText, tagPart) = T.breakOnEnd "_" base
-  let tag = T.drop 1 tagPart
+  let (uuidWithUnderscore, tag) = T.breakOnEnd "_" base
+  let uuidText = T.dropEnd 1 uuidWithUnderscore
   guard (not (T.null uuidText) && not (T.null tag))
   uuid <- fromText uuidText
   res <- resolutionFromTag tag

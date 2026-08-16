@@ -1,0 +1,33 @@
+name: tva-e2e
+version: 0.1.0.0
+synopsis: End-to-end tests for the tva service
+description: E2E testing framework for the tva video-processing service using docker-compose.
+license: MIT
+author: William Fernandes Dias
+
+language: GHC2021
+
+dependencies:
+  - base >= 4.17 && < 5
+  - hspec
+  - hspec-core
+  - typed-process
+  - http-client
+  - http-client-tls
+  - http-types
+  - http-conduit
+  - aeson
+  - text
+  - bytestring
+  - time
+  - network-uri
+  - containers
+
+tests:
+  tva-e2e-test:
+    main: Spec.hs
+    source-dirs: test
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N

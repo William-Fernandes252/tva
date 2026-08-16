@@ -6,6 +6,7 @@ packages:
   - api-server
   - video-worker
   - notifier-worker
+  - e2e
 
 extra-deps:
   - rel8-1.6.0.0

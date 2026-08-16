@@ -102,12 +102,15 @@ type VideoAPI =
       :> Capture "id" UUID
       :> "status"
       :> Get '[JSON] StatusResponse
-    -- POST /webhooks/minio -> S3 ObjectCreated event
-    :<|> "webhooks"
+    -- POST /webhook/minio -> Internal webhook for MinIO S3 notifications
+    :<|> "webhook"
       :> "minio"
       :> Header "Authorization" Text
       :> ReqBody '[JSON] MinioWebhookEvent
       :> Post '[JSON] NoContent
+    -- GET /health -> Health check endpoint
+    :<|> "health"
+      :> Get '[JSON] NoContent
 
 -- | A Proxy object allows us to pass our type-level API as a runtime value to the server function.
 videoApi :: Proxy VideoAPI

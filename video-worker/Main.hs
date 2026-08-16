@@ -11,6 +11,7 @@ module Main where
 
 import Control.Concurrent (threadDelay)
 import Control.Exception (SomeException, try)
+import Control.Monad (forever)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (MonadReader, ReaderT, ask, asks, local, runReaderT)
 import Data.Aeson qualified as Aeson
@@ -437,6 +438,9 @@ main = do
 
     -- Run the consumer loop (blocks until interrupted).
     liftIO $ setupConsumer cfg handleEvent
+    
+    -- Keep the main thread alive
+    liftIO $ forever $ threadDelay 1000000
 
 -- | Parse an integer from a string, returning Nothing on failure.
 readMaybe :: (Read a) => String -> Maybe a
