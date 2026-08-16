@@ -1,3 +1,4 @@
+-- migrate:up
 CREATE TABLE video_jobs (
     id UUID PRIMARY KEY,
     status TEXT NOT NULL,
@@ -7,3 +8,6 @@ CREATE TABLE video_jobs (
     output_chunks TEXT[],
     error_message TEXT
 );
+
+-- migrate:down
+DROP TABLE video_jobs;

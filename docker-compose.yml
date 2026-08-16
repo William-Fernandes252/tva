@@ -18,6 +18,18 @@ services:
       timeout: 5s
       retries: 5
 
+  dbmate:
+    image: amacneil/dbmate:latest
+    container_name: video_dbmate
+    command: ["-d", "/database/migrations", "up"]
+    environment:
+      DATABASE_URL: "postgres://video_user:video_password@postgres:5432/video_db?sslmode=disable"
+    volumes:
+      - ./database:/database
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   rabbitmq:
     image: rabbitmq:3.12-management-alpine
     container_name: video_rabbitmq

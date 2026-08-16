@@ -8,8 +8,6 @@ services:
       POSTGRES_USER: video_user
       POSTGRES_PASSWORD: video_password
       POSTGRES_DB: video_db
-    volumes:
-      - ./e2e/test/fixtures/init.sql:/docker-entrypoint-initdb.d/init.sql
     ports:
       - "5432:5432"
     healthcheck:
@@ -17,6 +15,18 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+
+  dbmate:
+    image: amacneil/dbmate:latest
+    container_name: video_dbmate_test
+    command: ["-d", "/database/migrations", "up"]
+    environment:
+      DATABASE_URL: "postgres://video_user:video_password@postgres:5432/video_db?sslmode=disable"
+    volumes:
+      - ./database:/database
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   rabbitmq:
     image: rabbitmq:3.12-management-alpine
@@ -86,6 +96,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      dbmate:
+        condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy
       minio:
@@ -116,6 +128,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      dbmate:
+        condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy
       minio:
@@ -141,5 +155,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      dbmate:
+        condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy

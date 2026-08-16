@@ -49,7 +49,7 @@ spec :: Spec
 spec = around_ (bracket_ setupDocker teardownDocker) $ do
   describe "E2E Video Processing" $ do
     it "uploads a video, processes it, and stores HLS chunks in MinIO" $ do
-      -- 1. Request presigned URL
+      -- Request presigned URL
       let reqBody = Aeson.object
             [ "fileExtension" Aeson..= ("mp4" :: Text)
             , "fileSize" Aeson..= (1024 :: Int)
@@ -69,7 +69,7 @@ spec = around_ (bracket_ setupDocker teardownDocker) $ do
               _ -> error "Missing videoId"
             _ -> error "Invalid upload response"
 
-      -- 2. Upload video file
+      -- Upload video file
       videoContent <- BSL.readFile "test/fixtures/sample.mp4"
       let putReq = setRequestBodyLBS videoContent $ setRequestMethod "PUT" (parseRequest_ (T.unpack presignedUrl))
       putRes <- httpNoBody putReq
@@ -90,7 +90,7 @@ spec = around_ (bracket_ setupDocker teardownDocker) $ do
       when (getResponseStatusCode webhookRes >= 400) $
         error $ "Webhook failed: " ++ show (getResponseStatusCode webhookRes)
 
-      -- 3. Poll status until completed
+      -- Poll status until completed
       let pollStatus n = do
             if n <= 0
               then expectationFailure "Video processing timed out"
