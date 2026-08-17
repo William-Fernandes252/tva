@@ -52,7 +52,7 @@ newSubscriptionHub :: IO SubscriptionHub
 newSubscriptionHub = SubscriptionHub <$> newTVarIO (0, Map.empty)
 
 -- | Register a WebSocket connection as watching a specific video.
---   Returns a unique identifier for later unsubscription.
+--   Returns a unique identifier for later un-subscription.
 subscribe :: SubscriptionHub -> Text -> WS.Connection -> IO Int
 subscribe (SubscriptionHub tv) vid conn = atomically $ do
   (nextId, subs) <- readTVar tv

@@ -70,10 +70,7 @@ initMinIO = do
         minioOutputBucket = B8.pack outputBucket
       }
 
-----------------------------------------------------------------------
--- SigV4 Signing
-----------------------------------------------------------------------
-
+-- | Generate AWS Signature Version 4 headers for MinIO requests.
 sigV4Headers ::
   MinioConfig ->
   BS.ByteString ->
