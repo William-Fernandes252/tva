@@ -30,6 +30,7 @@ dependencies:
 - hasql
 - rel8
 - katip
+- wai
 
 executables:
   tva-api-server:
@@ -41,4 +42,6 @@ executables:
     - Adapters.RabbitMQ
     - Adapters.S3
     - Config
-    ghc-options: -Wall
+    ghc-options:
+    - -Wall
+    - -threaded

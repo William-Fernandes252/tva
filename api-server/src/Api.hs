@@ -8,7 +8,7 @@
 
 module Api where
 
-import Data.Aeson (FromJSON, ToJSON)
+import Data.Aeson (FromJSON (..), ToJSON, withObject, (.:), (.:?), (.!=))
 import Data.Text (Text)
 import Data.UUID (UUID)
 import Domain.Core (EntityId (..), JobState (..), Resolution, Video)
@@ -56,7 +56,12 @@ data MinioWebhookEvent = MinioWebhookEvent
   }
   deriving (Show, Generic)
 
-instance FromJSON MinioWebhookEvent
+instance FromJSON MinioWebhookEvent where
+  parseJSON = withObject "MinioWebhookEvent" $ \v -> MinioWebhookEvent
+    <$> v .: "EventName"
+    <*> v .:? "Key"
+    <*> v .:? "Records" .!= []
+
 
 -- | A single event record within an S3 notification.
 data MinioRecord = MinioRecord
@@ -111,6 +116,8 @@ type VideoAPI =
     -- GET /health -> Health check endpoint
     :<|> "health"
       :> Get '[JSON] NoContent
+    -- GET / -> Serve static UI files
+    :<|> Raw
 
 -- | A Proxy object allows us to pass our type-level API as a runtime value to the server function.
 videoApi :: Proxy VideoAPI

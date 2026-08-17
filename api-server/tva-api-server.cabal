@@ -27,7 +27,7 @@ executable tva-api-server
   hs-source-dirs:
       ./
       src
-  ghc-options: -Wall
+  ghc-options: -Wall -threaded
   build-depends:
       aeson
     , amqp
@@ -46,5 +46,6 @@ executable tva-api-server
     , time
     , tva-core-domain
     , uuid
+    , wai
     , warp
   default-language: GHC2021

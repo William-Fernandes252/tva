@@ -56,6 +56,9 @@ COPY --from=builder --chown=appuser:appuser /app/bin/tva-api-server /usr/local/b
 COPY --from=builder --chown=appuser:appuser /app/bin/tva-video-worker /usr/local/bin/
 COPY --from=builder --chown=appuser:appuser /app/bin/tva-notifier-worker /usr/local/bin/
 
+# Copy the static web UI
+COPY --chown=appuser:appuser api-server/public /app/public
+
 USER appuser
 
 # By default, don't run anything (entrypoint overridden in docker-compose)

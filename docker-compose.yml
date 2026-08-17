@@ -58,12 +58,12 @@ services:
     volumes:
       - minio_data:/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: ["CMD", "mc", "ready", "local"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # Utility container to create the buckets on startup
+  # Utility container to create the buckets and configure webhooks on startup
   minio-init:
     image: minio/mc
     container_name: video_minio_init
@@ -75,8 +75,109 @@ services:
       mc alias set myminio http://minio:9000 minio_admin minio_password &&
       mc mb myminio/raw-videos --ignore-existing &&
       mc mb myminio/processed-videos --ignore-existing &&
-      mc anonymous set public myminio/processed-videos
+      mc anonymous set public myminio/processed-videos &&
+      mc admin config set myminio notify_webhook:1 endpoint='http://api-server:8080/webhook/minio' auth_token='Bearer test-secret' &&
+      mc admin service restart myminio &&
+      sleep 5 &&
+      mc event add myminio/raw-videos arn:minio:sqs::1:webhook --event put
       "
+
+  api-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tva_api_server
+    command: ["tva-api-server"]
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./api-server/public:/app/public
+    environment:
+      PG_HOST: postgres
+      PG_PORT: 5432
+      PG_USER: video_user
+      PG_PASS: video_password
+      PG_DB: video_db
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: mq_user
+      RABBITMQ_PASS: mq_password
+      RABBITMQ_VHOST: "/"
+      MINIO_ENDPOINT: http://localhost:9000
+      MINIO_PORT: 9000
+      MINIO_ACCESS_KEY: minio_admin
+      MINIO_SECRET_KEY: minio_password
+      MINIO_USE_SSL: "false"
+      MINIO_BUCKET: raw-videos
+      WEBHOOK_SECRET: "test-secret"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      dbmate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_started
+
+  video-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tva_video_worker
+    command: ["tva-video-worker"]
+    environment:
+      PG_HOST: postgres
+      PG_PORT: 5432
+      PG_USER: video_user
+      PG_PASS: video_password
+      PG_DB: video_db
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: mq_user
+      RABBITMQ_PASS: mq_password
+      RABBITMQ_VHOST: "/"
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_PORT: 9000
+      MINIO_ACCESS_KEY: minio_admin
+      MINIO_SECRET_KEY: minio_password
+      MINIO_USE_SSL: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      dbmate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_started
+
+  notifier-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tva_notifier_worker
+    command: ["tva-notifier-worker"]
+    ports:
+      - "8081:8081"
+    environment:
+      PG_HOST: postgres
+      PG_PORT: 5432
+      PG_USER: video_user
+      PG_PASS: video_password
+      PG_DB: video_db
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: mq_user
+      RABBITMQ_PASS: mq_password
+      RABBITMQ_VHOST: "/"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      dbmate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
 
 volumes:
   postgres_data:

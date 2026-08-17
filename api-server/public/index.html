@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TVA Video Transcoder</title>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <style>
+        :root {
+            --bg-color: #0f1115;
+            --container-bg: #1a1d24;
+            --text-main: #ffffff;
+            --text-muted: #8b92a5;
+            --accent: #3b82f6;
+            --accent-hover: #2563eb;
+            --border: #2e323e;
+            --radius: 12px;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            line-height: 1.5;
+            display: flex;
+            justify-content: center;
+            padding: 40px 20px;
+            min-height: 100vh;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 800px;
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 16px;
+        }
+
+        h1 {
+            font-size: 28px;
+            font-weight: 600;
+            letter-spacing: -0.5px;
+        }
+
+        .card {
+            background-color: var(--container-bg);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 24px;
+        }
+
+        /* Upload Area */
+        .upload-area {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+        }
+
+        .file-input-wrapper {
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .file-name {
+            font-size: 16px;
+            font-weight: 500;
+        }
+
+        .file-hint {
+            font-size: 14px;
+            color: var(--text-muted);
+        }
+
+        input[type="file"] {
+            display: none;
+        }
+
+        .btn {
+            background-color: var(--border);
+            color: var(--text-main);
+            border: none;
+            padding: 10px 16px;
+            font-size: 14px;
+            font-weight: 500;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        .btn:hover {
+            background-color: #3b3f4e;
+        }
+
+        .btn-primary {
+            background-color: var(--accent);
+        }
+
+        .btn-primary:hover {
+            background-color: var(--accent-hover);
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        /* Progress Area */
+        .progress-card {
+            display: none;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .progress-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-weight: 500;
+        }
+
+        .progress-track {
+            width: 100%;
+            height: 8px;
+            background-color: var(--border);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background-color: var(--accent);
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+
+        .status-text {
+            font-size: 14px;
+            color: var(--text-muted);
+            text-align: center;
+        }
+
+        /* Player Area */
+        .player-card {
+            display: none;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .player-card h2 {
+            font-size: 18px;
+            font-weight: 500;
+        }
+
+        video {
+            width: 100%;
+            border-radius: 8px;
+            background-color: #000;
+            aspect-ratio: 16 / 9;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <header>
+        <h1>TVA Video Transcoder</h1>
+    </header>
+
+    <div class="card">
+        <div class="upload-area">
+            <div class="file-input-wrapper">
+                <div class="file-name" id="file-name-display">Select Video File</div>
+                <div class="file-hint">Click choose file to select a source video</div>
+            </div>
+            <input type="file" id="video-input" accept="video/*">
+            <button class="btn" onclick="document.getElementById('video-input').click()">Choose File</button>
+            <button class="btn btn-primary" id="upload-btn" disabled>Upload & Process</button>
+        </div>
+    </div>
+
+    <div class="card progress-card" id="progress-card">
+        <div class="progress-header">
+            <span id="status-label">Processing...</span>
+            <span id="progress-percent">0%</span>
+        </div>
+        <div class="progress-track">
+            <div class="progress-fill" id="progress-fill"></div>
+        </div>
+        <div class="status-text" id="status-desc">Please wait while the video is uploaded and transcoded.</div>
+    </div>
+
+    <div class="card player-card" id="player-card">
+        <h2>Transcoded Output (HLS Stream)</h2>
+        <video id="video-player" controls></video>
+    </div>
+</div>
+
+<script>
+    const fileInput = document.getElementById('video-input');
+    const fileNameDisplay = document.getElementById('file-name-display');
+    const uploadBtn = document.getElementById('upload-btn');
+    const progressCard = document.getElementById('progress-card');
+    const progressFill = document.getElementById('progress-fill');
+    const progressPercent = document.getElementById('progress-percent');
+    const statusLabel = document.getElementById('status-label');
+    const statusDesc = document.getElementById('status-desc');
+    const playerCard = document.getElementById('player-card');
+    const videoPlayer = document.getElementById('video-player');
+
+    let selectedFile = null;
+
+    fileInput.addEventListener('change', (e) => {
+        if (e.target.files.length > 0) {
+            selectedFile = e.target.files[0];
+            fileNameDisplay.textContent = selectedFile.name;
+            uploadBtn.disabled = false;
+        }
+    });
+
+    uploadBtn.addEventListener('click', async () => {
+        if (!selectedFile) return;
+
+        uploadBtn.disabled = true;
+        fileInput.disabled = true;
+        progressCard.style.display = 'flex';
+        playerCard.style.display = 'none';
+        
+        statusLabel.textContent = 'Uploading...';
+        statusDesc.textContent = 'Uploading raw video to MinIO...';
+        progressPercent.textContent = '0%';
+        progressFill.style.width = '0%';
+
+        try {
+            // 1. Request presigned URL
+            const ext = '.' + selectedFile.name.split('.').pop();
+            const reqBody = {
+                fileExtension: ext,
+                fileSize: selectedFile.size,
+                resolution: "R1080p"
+            };
+
+            const res = await fetch('/videos', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(reqBody)
+            });
+
+            if (!res.ok) throw new Error('Failed to request upload URL');
+            const { videoId, presignedUrl } = await res.json();
+
+            // 2. Upload directly to MinIO
+            const uploadRes = await fetch(presignedUrl, {
+                method: 'PUT',
+                body: selectedFile
+            });
+
+            if (!uploadRes.ok) throw new Error('Failed to upload file to MinIO');
+
+            statusLabel.textContent = 'Transcoding...';
+            statusDesc.textContent = 'Video uploaded. Waiting for FFmpeg transcoding...';
+            
+            // 3. Connect to WebSocket to watch progress
+            connectWebSocket(videoId);
+
+        } catch (err) {
+            console.error(err);
+            statusLabel.textContent = 'Error';
+            statusDesc.textContent = err.message;
+            uploadBtn.disabled = false;
+            fileInput.disabled = false;
+        }
+    });
+
+    function connectWebSocket(videoId) {
+        // Assume notifier runs on port 8081 of the same host
+        const wsHost = window.location.hostname;
+        const ws = new WebSocket(`ws://${wsHost}:8081/ws/${videoId}`);
+
+        ws.onopen = () => {
+            console.log('WebSocket connected');
+        };
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            console.log('WS event:', data);
+
+            if (data.progress !== null) {
+                progressPercent.textContent = `${data.progress}%`;
+                progressFill.style.width = `${data.progress}%`;
+            }
+
+            if (data.newStatus === 'COMPLETED') {
+                statusLabel.textContent = 'Completed!';
+                statusDesc.textContent = 'Transcoding finished successfully.';
+                progressPercent.textContent = '100%';
+                progressFill.style.width = '100%';
+                ws.close();
+                
+                // Play the video
+                if (data.outputChunks && data.outputChunks.length > 0) {
+                    const m3u8Path = data.outputChunks.find(p => p.endsWith('.m3u8'));
+                    if (m3u8Path) {
+                        playVideo(m3u8Path);
+                    }
+                }
+            } else if (data.newStatus === 'FAILED') {
+                statusLabel.textContent = 'Failed';
+                statusDesc.textContent = data.errorMessage || 'Transcoding failed';
+                ws.close();
+            }
+        };
+
+        ws.onerror = (err) => {
+            console.error('WebSocket error:', err);
+        };
+    }
+
+    function playVideo(m3u8Path) {
+        playerCard.style.display = 'flex';
+        // MinIO public bucket URL
+        const streamUrl = `http://${window.location.hostname}:9000/processed-videos/${m3u8Path}`;
+        
+        if (Hls.isSupported()) {
+            const hls = new Hls();
+            hls.loadSource(streamUrl);
+            hls.attachMedia(videoPlayer);
+            hls.on(Hls.Events.MANIFEST_PARSED, function() {
+                videoPlayer.play();
+            });
+        }
+        else if (videoPlayer.canPlayType('application/vnd.apple.mpegurl')) {
+            videoPlayer.src = streamUrl;
+            videoPlayer.addEventListener('loadedmetadata', function() {
+                videoPlayer.play();
+            });
+        }
+    }
+</script>
+</body>
+</html>

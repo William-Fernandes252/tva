@@ -27,12 +27,14 @@ import Domain.Queue (MonadQueue (..))
 import Domain.Storage (MonadStorage (..))
 import Domain.Logger
 import Network.Wai.Handler.Warp (run)
+import qualified Network.Wai
 import Servant
+import Servant.Server.StaticFiles (serveDirectoryWebApp)
 
 -- | Polymorphic server implementation for the VideoAPI.
 --   Works in any monad that supports storage, queue, database, and IO operations.
 server :: (MonadStorage m, MonadQueue SystemEvent m, MonadDatabase m, MonadIO m, MonadError ServerError m) => Text -> ServerT VideoAPI m
-server webhookSecret = requestUpload :<|> checkStatus :<|> handleMinioWebhook :<|> checkHealth
+server webhookSecret = requestUpload :<|> checkStatus :<|> handleMinioWebhook :<|> checkHealth :<|> serveDirectoryWebApp "public"
   where
     -- \| Handler for POST /videos
     --   Generates a presigned upload URL and inserts a Pending job into the database.
@@ -101,7 +103,8 @@ parseObjectKey objKey = do
   let (uuidWithUnderscore, tag) = T.breakOnEnd "_" base
   let uuidText = T.dropEnd 1 uuidWithUnderscore
   guard (not (T.null uuidText) && not (T.null tag))
-  uuid <- fromText uuidText
+  let (_, finalUuidText) = T.breakOnEnd "/" uuidText
+  uuid <- fromText finalUuidText
   res <- resolutionFromTag tag
   return (EntityId uuid, res)
 
@@ -121,6 +124,13 @@ sweeperThread cfg = forever $ do
             return ()
           Nothing -> $(logTM) WarningS "Could not parse resolution for zombie job"
 
+-- | Rewrite root path to index.html
+rewriteRoot :: Network.Wai.Middleware
+rewriteRoot app req respond =
+  if Network.Wai.pathInfo req == [] || Network.Wai.pathInfo req == [""]
+    then app (req { Network.Wai.pathInfo = ["index.html"] }) respond
+    else app req respond
+
 -- | Application Boot
 main :: IO ()
 main = do
@@ -129,5 +139,5 @@ main = do
   _ <- forkIO (sweeperThread cfg)
   runKatipContextT (appLogEnv cfg) (mempty :: LogContexts) "api-server" $ do
     $(logTM) InfoS "Starting api-server on port 8080..."
-  let application = serve videoApi (hoistServer videoApi (nt cfg) (server secret))
+  let application = rewriteRoot $ serve videoApi (hoistServer videoApi (nt cfg) (server secret))
   run 8080 application

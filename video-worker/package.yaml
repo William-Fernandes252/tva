@@ -43,4 +43,6 @@ executables:
   tva-video-worker:
     main: Main.hs
     source-dirs: .
-    ghc-options: -Wall
+    ghc-options:
+      - -Wall
+      - -threaded

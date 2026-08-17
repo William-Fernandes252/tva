@@ -24,7 +24,7 @@ executable tva-video-worker
       Paths_tva_video_worker
   hs-source-dirs:
       ./
-  ghc-options: -Wall
+  ghc-options: -Wall -threaded
   build-depends:
       aeson
     , amqp

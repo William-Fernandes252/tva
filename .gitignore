@@ -25,5 +25,4 @@ cabal.project.local
 cabal.project.local~
 .HTF/
 .ghc.environment.*
-
-# End of https://www.toptal.com/developers/gitignore/api/haskell
+.DS_Store

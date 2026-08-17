@@ -33,4 +33,6 @@ executables:
   tva-notifier-worker:
     main: Main.hs
     source-dirs: .
-    ghc-options: -Wall
+    ghc-options:
+      - -Wall
+      - -threaded

@@ -22,7 +22,7 @@ executable tva-notifier-worker
       Paths_tva_notifier_worker
   hs-source-dirs:
       ./
-  ghc-options: -Wall
+  ghc-options: -Wall -threaded
   build-depends:
       aeson
     , async

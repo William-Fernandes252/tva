@@ -6,7 +6,9 @@ CREATE TABLE video_jobs (
     assigned_worker_id UUID,
     progress_percent INT,
     output_chunks TEXT[],
-    error_message TEXT
+    error_message TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL
 );
 
 -- migrate:down
